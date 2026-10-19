@@ -1,0 +1,8 @@
+!frontend/dist/
+!frontend/dist/**
+backend/tests/
+frontend/src/
+frontend/public/
+preview.html
+.env.*
+backend/.env.*
