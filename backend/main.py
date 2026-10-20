@@ -70,6 +70,7 @@ SYNC_METADATA_BATCH = 10
 SYNC_ITEM_LIMIT = 2000
 METADATA_VERSION = 4
 TMDB_CACHE_TTL = 24 * 60 * 60
+CAST_TICKET_TTL = 12 * 60 * 60
 TRANSCODE_SLOTS = asyncio.Semaphore(2)
 SUBTITLE_EXT = {'.srt', '.vtt', '.ass', '.ssa'}
 SUBTITLE_LIMIT = 2 * 1024 * 1024
@@ -169,6 +170,24 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title='Cinemateca API', version='0.3.0', lifespan=lifespan)
 DIST = BASE.parent / 'frontend' / 'dist'
+
+
+@app.middleware('http')
+async def media_cors(request: Request, call_next):
+    media = bool(re.fullmatch(r'/api/(?:stream/[^/]+|play/[^/]+|movies/[^/]+/subtitles/[^/]+)', request.url.path))
+    if media and request.method == 'OPTIONS':
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+    if media:
+        response.headers.update({
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+            'Access-Control-Allow-Headers': 'Range, Content-Type',
+            'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
+            'Referrer-Policy': 'no-referrer',
+        })
+    return response
 
 
 def cipher():
@@ -324,6 +343,46 @@ async def require_reader(request: Request, credentials: bool = False) -> dict:
     if shared and shared['enabled']:
         return await authorize_credentials(shared, shared=True) if credentials else shared
     return await require_user(request)
+
+
+async def playback_reader(request: Request, file_id: str, cast_token: str) -> dict:
+    if not cast_token:
+        return await require_reader(request, credentials=True)
+    try:
+        ticket = json.loads(cipher().decrypt(cast_token.encode(), ttl=CAST_TICKET_TTL))
+        if ticket['purpose'] != 'cast' or ticket['file_id'] != file_id:
+            raise ValueError()
+        library = require_library(ticket['user_id'])
+        if library['folder_id'] != ticket['folder_id']:
+            raise ValueError()
+        if ticket.get('sid'):
+            with db() as con:
+                row = con.execute(text('SELECT * FROM sessions WHERE sid=:sid AND user_id=:user_id'),
+                                  {'sid': ticket['sid'], 'user_id': ticket['user_id']}).mappings().first()
+            shared = False
+        else:
+            row = public_library()
+            shared = True
+            if not row or not row['enabled'] or row['user_id'] != ticket['user_id']:
+                raise ValueError()
+        if not row:
+            raise ValueError()
+    except (InvalidToken, ValueError, KeyError, TypeError, HTTPException) as exc:
+        raise HTTPException(401, 'El enlace de Chromecast venció o fue revocado. Volvé a transmitir la película.') from exc
+    return await authorize_credentials(dict(row), shared=shared)
+
+
+@app.post('/api/movies/{file_id}/cast')
+async def cast_ticket(request: Request, file_id: str):
+    is_csrf_safe(request)
+    user = await require_reader(request)
+    library_movie(user['user_id'], file_id)
+    library = require_library(user['user_id'])
+    ticket = {'purpose': 'cast', 'file_id': file_id, 'user_id': user['user_id'],
+              'folder_id': library['folder_id'], 'sid': user.get('sid')}
+    token = cipher().encrypt(json.dumps(ticket).encode()).decode()
+    return JSONResponse({'token': token, 'expires_at': int(time.time()) + CAST_TICKET_TTL},
+                        headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/auth/login')
@@ -631,6 +690,21 @@ def compose_movies(user_id: str, file_ids: list[str] | None = None) -> list[dict
     return sorted(result, key=lambda movie:movie['title'].casefold())
 
 
+def movie_group_key(movie: dict):
+    return f"tmdb:{movie['tmdbId']}" if movie.get('tmdbId') else (normalized(movie['title']), movie.get('year', ''))
+
+
+@app.get('/api/movies/{file_id}')
+async def movie_details(request: Request, file_id: str):
+    user = await require_reader(request)
+    validate_id(file_id)
+    movies = compose_movies(user['user_id'])
+    selected = next((movie for movie in movies if movie['id'] == file_id), None)
+    if selected is None:
+        raise HTTPException(404, 'Esta película no está en tu biblioteca')
+    return {'movie': selected, 'versions': [movie for movie in movies if movie_group_key(movie) == movie_group_key(selected)]}
+
+
 @app.get('/api/movies')
 async def movies(request: Request, offset: int = Query(0, ge=0), limit: int = Query(16, ge=1, le=2000),
                  q: str = '', genre: str = '', favorite: bool = False,
@@ -641,7 +715,7 @@ async def movies(request: Request, offset: int = Query(0, ge=0), limit: int = Qu
     genres = sorted({name.strip() for movie in result for name in movie.get('genre', '').split(',') if name.strip()})
     groups = {}
     for movie in result:
-        key = f"tmdb:{movie['tmdbId']}" if movie.get('tmdbId') else (normalized(movie['title']), movie.get('year', ''))
+        key = movie_group_key(movie)
         groups.setdefault(key, []).append(movie)
     query = normalized(q)
     filtered = [group for group in groups.values() if any(
@@ -931,17 +1005,21 @@ async def subtitles(request: Request, file_id: str):
                        for track in tracks if track.get('capabilities', {}).get('canDownload', True)]}
 
 
-@app.get('/api/movies/{file_id}/subtitles/{subtitle_id}')
+@app.api_route('/api/movies/{file_id}/subtitles/{subtitle_id}', methods=['GET', 'HEAD'])
 async def subtitle_content(request: Request, file_id: str, subtitle_id: str,
-                           offset: float = Query(0, ge=0, le=172800)):
+                           offset: float = Query(0, ge=0, le=172800), cast_token: str = Query('', max_length=3000)):
     validate_id(subtitle_id)
-    user = await require_reader(request, credentials=True)
+    user = await playback_reader(request, file_id, cast_token)
     tracks = await subtitle_files(user, file_id)
     selected = next((track for track in tracks if track['id'] == subtitle_id), None)
     if not selected:
         raise HTTPException(404, 'El subtítulo no está asociado a esta película')
     if not selected.get('capabilities', {}).get('canDownload', True):
         raise HTTPException(403, 'El propietario deshabilitó la descarga del subtítulo')
+    if request.method == 'HEAD':
+        response = Response(media_type='text/vtt', headers={'Cache-Control': 'private, no-store'})
+        del response.headers['content-length']
+        return response
     content = bytearray()
     try:
         async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
@@ -960,13 +1038,18 @@ async def subtitle_content(request: Request, file_id: str, subtitle_id: str,
                     headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
 
 
-@app.get('/api/play/{file_id}')
-async def compatible_stream(request: Request, file_id: str, start: float = Query(0, ge=0, le=172800)):
-    user = await require_reader(request, credentials=True)
+@app.api_route('/api/play/{file_id}', methods=['GET', 'HEAD'])
+async def compatible_stream(request: Request, file_id: str, start: float = Query(0, ge=0, le=172800),
+                            cast_token: str = Query('', max_length=3000)):
+    user = await playback_reader(request, file_id, cast_token)
     movie = library_movie(user['user_id'], file_id)
     duration = movie.get('durationSeconds') or movie.get('duration', 0) * 60
     if duration and start >= duration:
         raise HTTPException(416, 'La posición está fuera de la película')
+    if request.method == 'HEAD':
+        response = Response(media_type='video/mp4', headers={'Accept-Ranges': 'none', 'Cache-Control': 'private, no-store'})
+        del response.headers['content-length']
+        return response
     if TRANSCODE_SLOTS.locked():
         raise HTTPException(503, 'Las dos reproducciones compatibles del servidor están ocupadas. Probá de nuevo en un momento.')
     await TRANSCODE_SLOTS.acquire()
@@ -1020,13 +1103,21 @@ async def compatible_stream(request: Request, file_id: str, start: float = Query
         'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'none'})
 
 
-@app.get('/api/stream/{file_id}')
-async def stream(request: Request, file_id: str, download: bool = False):
-    user = await require_reader(request, credentials=True)
+@app.api_route('/api/stream/{file_id}', methods=['GET', 'HEAD'])
+async def stream(request: Request, file_id: str, download: bool = False, cast_token: str = Query('', max_length=3000)):
+    user = await playback_reader(request, file_id, cast_token)
     metadata = library_movie(user['user_id'], file_id)
     range_header = request.headers.get('range')
     if range_header and not RANGE_RE.fullmatch(range_header):
         raise HTTPException(416, 'Solo se admite un único rango de bytes')
+    if request.method == 'HEAD':
+        response = Response(media_type=metadata.get('mime') or 'application/octet-stream',
+                            headers={'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store'})
+        if metadata.get('size'):
+            response.headers['Content-Length'] = str(metadata['size'])
+        else:
+            del response.headers['content-length']
+        return response
     headers = {'Authorization': f"Bearer {user['access_token']}"}
     if range_header:
         headers['Range'] = range_header

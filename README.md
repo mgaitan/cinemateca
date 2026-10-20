@@ -9,14 +9,15 @@ El propietario autoriza Google y elige su carpeta. Puede configurar `DEFAULT_DRI
 ## Funcionalidades
 
 - Grilla de pósters grandes, búsqueda por título, año, dirección, país y reparto; filtros por género y orden por título, año o popularidad TMDB.
-- Fichas con países, dirección, reparto principal y sinopsis; versiones de una misma película agrupadas bajo un solo póster.
+- Fichas con URL propia, países, dirección, reparto principal y sinopsis; versiones de una misma película agrupadas bajo un solo póster.
 - Reproducción original o con audio AAC estéreo, descarga del original y enlace del archivo a Drive.
+- Google Cast desde la ficha o el reproductor: reproducción en Chromecast con pausa, volumen, búsqueda temporal y subtítulos externos.
 - Subtítulos externos con carga automática, conversión a WebVTT, selección de pista y opción de desactivarlos.
 - Publicación abierta de solo lectura; edición, favoritos, sincronización y administración reservados al propietario.
 
 ## Desarrollo con uv
 
-Necesitás [uv](https://docs.astral.sh/uv/) y Node.js 24 LTS. Python **3.13** está fijado por compatibilidad con el driver de libSQL. `uv` descarga Python y crea `.venv` automáticamente. Las dependencias se declaran en `pyproject.toml` y se fijan en `uv.lock`; no se usan archivos `requirements.txt`.
+Necesitás [uv](https://docs.astral.sh/uv/) y Node.js 24 LTS. Python **3.13** está fijado por compatibilidad con el driver de libSQL. La [documentación de FastAPI Cloud](https://fastapicloud.com/docs/builds-and-deployments/install-dependencies/) declara soporte para versiones mantenidas de Python y selección mediante `requires-python` o `.python-version`, pero la app todavía no migra a 3.15: la resolución de dependencias para esa versión falla porque `sqlalchemy-libsql` requiere `libsql-experimental`, sin wheels compatibles con CPython 3.15. El paquete fuente actual usa PyO3 0.19; actualizar Python requiere resolver primero esa dependencia nativa y volver a validar el driver. `uv` descarga Python y crea `.venv` automáticamente. Las dependencias se declaran en `pyproject.toml` y se fijan en `uv.lock`; no se usan archivos `requirements.txt`.
 
 Todos los comandos parten de la raíz del repositorio:
 
@@ -147,6 +148,8 @@ Los prefijos de enumeración como `38. Antigone (2019).mkv` se omiten al buscar 
 
 La grilla agrupa archivos por ID de TMDB, o por título y año cuando falta ese ID. Cada película muestra un solo póster, año, países y cantidad de versiones. En la ficha se puede elegir el archivo/edición, con su nombre, subcarpeta, duración y tamaño. Reproducir, descargar y abrir Drive usan la versión elegida; los originales no se borran ni se fusionan.
 
+Cada póster y título enlaza a `/peliculas/{file_id}`. La ficha se abre como página, admite recarga, apertura en otra pestaña y enlaces compartidos; `GET /api/movies/{file_id}` recupera la película y todas sus versiones desde el índice guardado aunque no estén en la página actual del catálogo. Cambiar de versión navega a la URL de ese archivo. La reproducción y la edición aparecen dentro de la misma página; los permisos de lectura y administración se conservan.
+
 `GET /api/movies` devuelve páginas de 16 películas agrupadas con todas sus versiones. Acepta `offset`, `limit`, `q`, `genre`, `favorite` y `sort` (`title`, `year`, `popularity`), e informa `count`, `genres` y `next_offset`. Los filtros y el orden se aplican a toda la biblioteca antes de paginar. El navegador solicita la siguiente página al acercarse al final del listado; también ofrece un botón para cargar más. El servidor lee el índice guardado para armar las páginas, sin consultar Drive.
 
 ## Reproducción, sonido y subtítulos
@@ -162,6 +165,20 @@ Los subtítulos externos **SRT, VTT, ASS y SSA** de la misma carpeta o de una su
 Se activa automáticamente la primera pista identificada como español, o la primera disponible. El selector permite cambiarla o elegir **Desactivados**. Al saltar en el modo compatible se ajustan los tiempos del subtítulo. Si la lectura o conversión falla, se informa en el reproductor. No se extraen pistas incrustadas de MKV; los subtítulos quemados en la imagen no se pueden desactivar.
 
 En la ficha, el nombre de archivo abre su página de Google Drive y **Descargar** entrega el original con su nombre, a través del servidor y sin exponer tokens. `GET /api/stream/{file_id}?download=true` agrega `Content-Disposition: attachment` y conserva los rangos. Tanto las descargas como los subtítulos y la reproducción exigen una sesión válida o una publicación habilitada y se limitan a la biblioteca indexada.
+
+## Chromecast
+
+**Reproducir en Chromecast** aparece en la ficha cuando el SDK detecta dispositivos disponibles o una sesión Cast activa. El botón inicia la película en el receptor sin abrir el reproductor local. Desde el reproductor se transfiere la posición, el modo de audio y el subtítulo elegido. El servidor entrega los bytes al Chromecast; el celular o la computadora solo controla la reproducción. Navegar a otra ficha o cerrar la pestaña no envía una orden de detener. Al volver al mismo origen, el SDK intenta recuperar la sesión.
+
+La integración usa el [Web Sender SDK y Default Media Receiver de Google](https://developers.google.com/cast/docs/web_sender/integrate), sin registrar una aplicación receptora propia. Abrí la app por HTTPS en un navegador compatible con Google Cast, con acceso al dispositivo y permiso de red local si el navegador lo solicita. El Chromecast debe poder alcanzar la URL del servidor; `localhost` apunta al propio receptor y no sirve para reproducir desde otro dispositivo.
+
+El modo predeterminado transmite MP4 fragmentado con AAC estéreo, usando la conversión existente. Un MKV se remultiplexa en el servidor, sin descargarlo completo ni volver a codificar su video. H.264 suele ser la opción más compatible; HEVC/H.265 requiere un modelo que lo soporte. Los contenedores, perfiles y resoluciones admitidos dependen del [modelo de Chromecast](https://developers.google.com/cast/docs/media). En modo Original se envía el archivo tal cual; MKV no es un contenedor admitido por el receptor estándar. Los subtítulos incrustados siguen sin extraerse.
+
+El panel de Cast permite pausar, reanudar, detener, ajustar volumen, seleccionar subtítulos externos y buscar una posición. En modo compatible, la búsqueda vuelve a cargar el stream desde el instante indicado y ajusta los tiempos WebVTT; requiere conocer la duración. En modo Original se usa la búsqueda nativa del receptor. Los controles desaparecen al terminar la sesión; cerrar un modal no la termina.
+
+`POST /api/movies/{file_id}/cast` entrega un enlace de autorización cifrado y autenticado con vencimiento de 12 horas, limitado a una película y su carpeta. El receptor lo envía como `cast_token` a los endpoints de video y subtítulos, sin cookies ni credenciales de Google. Cada petición comprueba la biblioteca y los permisos actuales. Los enlaces privados dependen de la sesión que los creó; cerrar sesión los revoca para peticiones nuevas. Los públicos dependen de que siga habilitada la publicación. Cambiar de carpeta o deshabilitar descargas también impide nuevos accesos. Solo las rutas de medios ofrecen CORS, preflight y HEAD para el receptor; estos enlaces no autorizan consultas del catálogo ni escrituras.
+
+La integración se comprobó en navegador con un SDK/receptor simulado y con pruebas de API y conversión real de MKV/E-AC-3 a MP4/AAC. Queda pendiente verificar reproducción, pausas prolongadas, reconexión y búsquedas con un Chromecast físico y archivos reales. Siguen aplicando los límites del hosting y de dos conversiones simultáneas por proceso.
 
 ## Verificación y límites
 

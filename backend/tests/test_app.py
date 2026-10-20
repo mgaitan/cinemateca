@@ -116,6 +116,47 @@ def test_catalog_pages_groups_and_filters_entire_library(client, drive):
         assert client.get('/api/movies?' + query).status_code == 422
 
 
+def test_movie_details_load_directly_with_versions_and_edits(client, drive):
+    user_id = connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    films = [{'id': f'movie_{index:03}_12345', 'title': f'Película {index:03}', 'year': '2024'}
+             for index in range(20)]
+    films[-1]['tmdbId'] = 123
+    films.append({**films[-1], 'id': 'another_version_12345', 'title': 'Versión alternativa'})
+    with main.db() as connection:
+        main.save_movies(connection, user_id, films)
+    assert films[-2]['id'] not in {film['id'] for film in client.get('/api/movies').json()['movies']}
+    response = client.get('/api/movies/' + films[-2]['id'])
+    assert response.status_code == 200
+    assert response.json()['movie']['id'] == films[-2]['id']
+    assert {version['id'] for version in response.json()['versions']} == {films[-1]['id'], films[-2]['id']}
+    client.patch('/api/movies/' + films[-2]['id'], json={'overview': 'Edición manual', 'favorite': True})
+    assert client.get('/api/movies/' + films[-2]['id']).json()['movie']['overview'] == 'Edición manual'
+    assert client.get('/api/movies/unknown_movie_12345').status_code == 404
+    assert client.get('/api/movies/invalid').status_code == 400
+    client.post('/api/sharing', json={'enabled': True})
+    client.post('/auth/logout')
+    assert client.get('/api/movies/' + films[-2]['id']).json()['movie']['favorite'] is True
+    with main.db() as connection:
+        connection.execute(text('UPDATE public_library SET enabled=0'))
+    assert client.get('/api/movies/' + films[-2]['id']).status_code == 401
+    connect_user(client)
+    assert client.get('/api/movies/' + films[-2]['id']).status_code == 404
+
+
+def test_movie_details_group_versions_by_title_without_tmdb(client, drive):
+    user_id = connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    with main.db() as connection:
+        main.save_movies(connection, user_id, [
+            {'id': 'movie_first_12345', 'title': 'Antígona', 'year': '2019'},
+            {'id': 'movie_second_12345', 'title': 'ANTIGONA', 'year': '2019'},
+            {'id': 'movie_remake_12345', 'title': 'Antígona', 'year': '2024'},
+        ])
+    data = client.get('/api/movies/movie_first_12345').json()
+    assert {film['id'] for film in data['versions']} == {'movie_first_12345', 'movie_second_12345'}
+
+
 def test_catalog_survives_restart_and_does_not_scan_drive(client, drive, monkeypatch):
     connect_user(client)
     client.post('/api/library', json={'url': 'test_folder_12345'})
@@ -199,7 +240,8 @@ def test_server_repairs_numbered_titles_without_rescanning(client, drive, monkey
 
 
 @pytest.mark.parametrize('download', [False, True])
-def test_video_stream_and_download(client, drive, monkeypatch, download):
+@pytest.mark.parametrize('casting', [False, True])
+def test_video_stream_and_download(client, drive, monkeypatch, download, casting):
     import httpx
 
     from urllib.parse import quote
@@ -233,18 +275,132 @@ def test_video_stream_and_download(client, drive, monkeypatch, download):
     async_client = httpx.AsyncClient
     monkeypatch.setattr(main.httpx, 'AsyncClient',
                         lambda **options: async_client(transport=httpx.MockTransport(respond), **options))
-    response = client.get(f'/api/stream/test_movie_12345?download={str(download).lower()}',
-                          headers={'Range': 'bytes=0-4'})
+    params = {'download': str(download).lower()}
+    if casting:
+        ticket = client.post('/api/movies/test_movie_12345/cast')
+        assert ticket.status_code == 200
+        assert ticket.headers['cache-control'] == 'no-store'
+        params['cast_token'] = ticket.json()['token']
+        client.cookies.clear()
+    response = client.get('/api/stream/test_movie_12345',
+                          params=params, headers={'Range': 'bytes=0-4', 'Origin': 'https://receiver.example'})
     assert response.status_code == 206
     assert response.content == b'video'
     assert response.headers['content-range'] == 'bytes 0-4/100'
     assert response.headers['content-type'] == 'video/x-matroska'
     assert response.headers['cache-control'] == 'private, no-store'
+    assert response.headers['access-control-allow-origin'] == '*'
+    assert 'Content-Range' in response.headers['access-control-expose-headers']
     if download:
         assert response.headers['content-disposition'] == f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
     else:
         assert 'content-disposition' not in response.headers
     assert closed
+
+
+def test_cast_ticket_scope_expiry_and_revocation(client, drive):
+    user_id = connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    client.post('/api/sync')
+    assert client.post('/api/movies/test_movie_12345/cast', headers={'Origin': 'https://evil.example'}).status_code == 403
+    assert client.post('/api/movies/unknown_movie_12345/cast').status_code == 404
+    ticket = client.post('/api/movies/test_movie_12345/cast').json()
+    assert ticket['expires_at'] > time.time() + 11 * 3600
+    assert 'access-token' not in json.dumps(ticket)
+    assert 'refresh-token' not in json.dumps(ticket)
+    owner_sid = client.cookies.get('cm_sid')
+    client.cookies.clear()
+    params = {'cast_token': ticket['token']}
+    response = client.head('/api/stream/test_movie_12345', params=params)
+    assert response.status_code == 200
+    assert response.headers['content-length'] == '1024'
+    assert response.headers['content-type'] == 'video/mp4'
+    assert client.head('/api/play/test_movie_12345', params=params).status_code == 200
+    assert client.get('/api/stream/another_movie_12345', params=params).status_code == 401
+    assert client.get('/api/movies', params=params).status_code == 401
+    assert client.get('/api/movies/test_movie_12345', params=params).status_code == 401
+    assert client.patch('/api/movies/test_movie_12345', params=params, json={'favorite': True}).status_code == 401
+    assert client.head('/api/play/test_movie_12345', params={'cast_token': ticket['token'] + 'tampered'}).status_code == 401
+    data = main.cipher().decrypt(ticket['token'].encode())
+    expired = main.cipher().encrypt_at_time(data, int(time.time()) - main.CAST_TICKET_TTL - 1).decode()
+    assert client.head('/api/play/test_movie_12345', params={'cast_token': expired}).status_code == 401
+    with main.db() as connection:
+        connection.execute(text('UPDATE libraries SET folder_id=:folder WHERE user_id=:user_id'),
+                           {'folder': 'new_folder_12345', 'user_id': user_id})
+    assert client.head('/api/play/test_movie_12345', params=params).status_code == 401
+    with main.db() as connection:
+        connection.execute(text('UPDATE libraries SET folder_id=:folder WHERE user_id=:user_id'),
+                           {'folder': 'test_folder_12345', 'user_id': user_id})
+    client.cookies.set('cm_sid', owner_sid)
+    client.post('/auth/logout')
+    assert client.head('/api/play/test_movie_12345', params=params).status_code == 401
+
+
+def test_public_cast_tickets_survive_logout_and_respect_sharing(client, drive):
+    user_id = connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    client.post('/api/sync')
+    client.post('/api/sharing', json={'enabled': True})
+    client.post('/auth/logout')
+    ticket = client.post('/api/movies/test_movie_12345/cast')
+    assert ticket.status_code == 200
+    params = {'cast_token': ticket.json()['token']}
+    assert client.head('/api/stream/test_movie_12345', params=params).status_code == 200
+    with main.db() as connection:
+        main.save_movies(connection, user_id, [{'id': 'test_movie_12345', 'title': 'Restricted', 'canDownload': False}])
+    assert client.head('/api/play/test_movie_12345', params=params).status_code == 403
+    assert client.post('/api/movies/test_movie_12345/cast').status_code == 403
+    with main.db() as connection:
+        connection.execute(text('UPDATE public_library SET enabled=0'))
+    assert client.head('/api/stream/test_movie_12345', params=params).status_code == 401
+    assert client.post('/api/movies/test_movie_12345/cast').status_code == 401
+
+
+def test_cast_media_preflight_is_limited_to_media_routes(client):
+    headers = {'Origin': 'https://receiver.example', 'Access-Control-Request-Method': 'GET',
+               'Access-Control-Request-Headers': 'Range'}
+    for path in ('/api/stream/test_movie_12345', '/api/play/test_movie_12345',
+                 '/api/movies/test_movie_12345/subtitles/test_subtitle_12345'):
+        response = client.options(path, headers=headers)
+        assert response.status_code == 204
+        assert response.headers['access-control-allow-origin'] == '*'
+        assert 'Range' in response.headers['access-control-allow-headers']
+        assert 'access-control-allow-credentials' not in response.headers
+        denied = client.get(path)
+        assert denied.status_code == 401
+        assert denied.headers['access-control-allow-origin'] == '*'
+    for path in ('/api/movies', '/api/sharing', '/auth/login'):
+        assert 'access-control-allow-origin' not in client.options(path, headers=headers).headers
+
+
+@pytest.mark.parametrize('shared', [False, True])
+def test_cast_receiver_refreshes_google_access_without_cookies(client, drive, monkeypatch, shared):
+    import httpx
+
+    connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    client.post('/api/sync')
+    if shared:
+        client.post('/api/sharing', json={'enabled': True})
+    ticket = client.post('/api/movies/test_movie_12345/cast').json()['token']
+    with main.db() as connection:
+        connection.execute(text('UPDATE sessions SET expires_at=0'))
+        connection.execute(text('UPDATE public_library SET expires_at=0'))
+    client.cookies.clear()
+    refreshes = []
+
+    def respond(request):
+        assert str(request.url) == main.TOKEN_URL
+        assert b'grant_type=refresh_token' in request.content
+        refreshes.append(True)
+        return httpx.Response(200, json={'access_token': 'refreshed-token', 'expires_in': 3600})
+
+    async_client = httpx.AsyncClient
+    monkeypatch.setattr(main.httpx, 'AsyncClient',
+                        lambda **options: async_client(transport=httpx.MockTransport(respond), **options))
+    for path in ('/api/stream/test_movie_12345', '/api/play/test_movie_12345'):
+        assert client.head(path, params={'cast_token': ticket}).status_code == 200
+    assert refreshes == [True]
 
 
 def test_download_restrictions(client, drive, monkeypatch):
@@ -350,7 +506,8 @@ def test_sharing_can_be_revoked_and_folder_changes_disable_it(client, drive):
     assert client.get('/api/movies').status_code == 401
 
 
-def test_subtitle_discovery_conversion_and_access_control(client, drive, monkeypatch):
+@pytest.mark.parametrize('casting', [False, True])
+def test_subtitle_discovery_conversion_and_access_control(client, drive, monkeypatch, casting):
     import httpx
 
     connect_user(client)
@@ -375,15 +532,23 @@ def test_subtitle_discovery_conversion_and_access_control(client, drive, monkeyp
                         lambda **options: async_client(transport=httpx.MockTransport(respond), **options))
     tracks = client.get('/api/movies/test_movie_12345/subtitles').json()['tracks']
     assert [track['id'] for track in tracks] == ['subtitle_123456']
-    response = client.get(tracks[0]['src'])
+    params = {}
+    if casting:
+        params['cast_token'] = client.post('/api/movies/test_movie_12345/cast').json()['token']
+        client.cookies.clear()
+    response = client.get(tracks[0]['src'], params=params, headers={'Origin': 'https://receiver.example'})
     assert response.status_code == 200
     assert response.headers['content-type'].startswith('text/vtt')
     assert response.text.startswith('WEBVTT\n')
     assert '00:00:01.000 --> 00:00:03.000' in response.text
     assert 'Hola, día.' in response.text
-    shifted = client.get(tracks[0]['src'] + '?offset=2').text
+    assert response.headers['access-control-allow-origin'] == '*'
+    shifted = client.get(tracks[0]['src'], params={**params, 'offset': 2}).text
+    head = client.head(tracks[0]['src'], params=params)
+    assert head.status_code == 200
+    assert head.headers['content-type'].startswith('text/vtt')
     assert '00:00:00.000 --> 00:00:01.000' in shifted
-    assert client.get('/api/movies/test_movie_12345/subtitles/other_sub_12345').status_code == 404
+    assert client.get('/api/movies/test_movie_12345/subtitles/other_sub_12345', params=params).status_code == 404
     connect_user(client)
     assert client.get('/api/movies/test_movie_12345/subtitles').status_code == 404
     assert client.get(tracks[0]['src']).status_code == 404
@@ -417,7 +582,8 @@ def test_tmdb_details_include_country_director_and_cast(client, monkeypatch):
     asyncio.run(fetch_metadata())
 
 
-def test_compatible_endpoint_access_limits_and_cleanup(client, drive, monkeypatch):
+@pytest.mark.parametrize('casting', [False, True])
+def test_compatible_endpoint_access_limits_and_cleanup(client, drive, monkeypatch, casting):
     import asyncio
     import sys
 
@@ -445,12 +611,21 @@ def test_compatible_endpoint_access_limits_and_cleanup(client, drive, monkeypatc
 
     monkeypatch.setattr(main, 'DriveSource', Source)
     monkeypatch.setattr(main, 'compatible_command', command)
-    response = client.get('/api/play/test_movie_12345')
+    params = {}
+    owner_sid = client.cookies.get('cm_sid')
+    if casting:
+        params['cast_token'] = client.post('/api/movies/test_movie_12345/cast').json()['token']
+        client.cookies.clear()
+    assert client.head('/api/play/test_movie_12345', params=params).status_code == 200
+    assert not closed
+    response = client.get('/api/play/test_movie_12345', params=params)
     assert response.status_code == 200
     assert response.content == b'ftyp-mp4-aac'
     assert response.headers['content-type'] == 'video/mp4'
+    assert response.headers['access-control-allow-origin'] == '*'
     assert closed == [True]
     assert not main.TRANSCODE_SLOTS.locked()
+    client.cookies.set('cm_sid', owner_sid)
     assert client.get('/api/play/test_movie_12345?start=-1').status_code == 422
     monkeypatch.setattr(main, 'TRANSCODE_SLOTS', asyncio.Semaphore(0))
     assert client.get('/api/play/test_movie_12345').status_code == 503
@@ -472,6 +647,7 @@ def test_static_frontend_and_api_routing(client):
     assert client.get('/').headers['content-type'].startswith('text/html')
     assert client.get('/demo/arrival.jpg').headers['content-type'] == 'image/jpeg'
     assert client.get('/catalogo/peliculas', headers={'Accept': 'text/html'}).headers['content-type'].startswith('text/html')
+    assert client.get('/peliculas/test_movie_12345', headers={'Accept': 'text/html'}).headers['content-type'].startswith('text/html')
     assert client.head('/').status_code == 200
     for path in ('/api/missing', '/auth/missing'):
         response = client.get(path)

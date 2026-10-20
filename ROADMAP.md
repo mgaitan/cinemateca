@@ -13,9 +13,11 @@ El README describe el comportamiento implementado y cómo ejecutarlo. Esta hoja 
 - [x] Catálogo real, sin portada comercial: pósters grandes, búsqueda, filtros por género y orden por título, año o popularidad TMDB.
 - [x] Países, dirección, reparto principal y sinopsis desde TMDB; caché versionada y edición manual de metadatos.
 - [x] Versiones agrupadas por película, con selección del archivo en la ficha y sin borrar originales.
+- [x] Fichas en `/peliculas/{file_id}`, con carga directa, reproducción y edición en la página; Cast visible al detectar dispositivos.
 - [x] Reproducción y descarga del original con rangos HTTP; nombre del archivo enlazado a Drive.
 - [x] Modo compatible con AAC estéreo y video sin recodificar, barra temporal y límite de dos conversiones simultáneas por proceso.
 - [x] Subtítulos externos SRT/VTT/ASS/SSA, conversión a WebVTT, carga automática y selector para cambiarlos o apagarlos.
+- [x] Integración de Google Cast con receptor estándar, controles remotos y enlaces temporales por película; validación con receptor simulado.
 - [x] Acceso abierto sin Google, estrictamente de lectura; administración, favoritos, edición y sincronización reservados al propietario.
 - [x] Credenciales de la biblioteca publicada independientes de la sesión del navegador; revocación de acceso y protección al cambiar de carpeta.
 - [x] Pruebas con SQLite/libSQL, permisos públicos/privados, OAuth, CSRF, rangos, subtítulos, TMDB y conversión real de audio.
@@ -34,6 +36,7 @@ El README describe el comportamiento implementado y cómo ejecutarlo. Esta hoja 
 ## Próxima validación
 
 - [ ] Reproducción completa de películas grandes, saltos prolongados y reconexiones en distintos navegadores y dispositivos.
+- [ ] Chromecast físico: MP4 fragmentado desde MKV, códecs por modelo, pausas prolongadas, subtítulos, búsquedas y reconexión del control.
 - [ ] Concurrencia, consumo de CPU/memoria, cuotas de Drive y comportamiento del hosting bajo carga.
 - [ ] Confirmación de despliegues nuevos y recuperación tras fallos DNS del hosting, conservando la biblioteca en Turso.
 - [ ] Pruebas automatizadas de navegador y revisión de accesibilidad: teclado, foco de modales, lectores de pantalla y controles del reproductor.
