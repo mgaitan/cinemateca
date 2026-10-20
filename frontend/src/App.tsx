@@ -3,13 +3,11 @@ import type { ReactNode } from 'react'
 import { CirclePlay, Download, Heart, Loader2, RefreshCw, Search, Settings, X } from 'lucide-react'
 import * as backend from './api'
 import Player from './Player'
-import type { Film, FilmEdit, Session, SyncProgress, SyncResult } from './types'
+import type { CatalogPage, Film, FilmEdit, Session, SyncProgress } from './types'
 
 type Dialog = 'drive' | 'edit' | 'player' | null
 type SortOrder = 'title' | 'year' | 'popularity'
 const normalize = (value:string) => value.normalize('NFD').replace(/\p{Diacritic}/gu,'').toLocaleLowerCase()
-const genresOf = (film:Film) => film.genre.split(',').map(genre=>genre.trim()).filter(Boolean)
-const byTitle = (first:Film,second:Film) => first.title.localeCompare(second.title,'es')
 const filmKey = (film:Film) => film.tmdbId?`tmdb:${film.tmdbId}`:`${normalize(film.title)}|${film.year}`
 const versionLabel = (film:Film) => [film.filename,film.category?.includes('/')?film.category.split('/').slice(-1)[0]:'',film.duration?`${film.duration} min`:'',film.size?`${(film.size/1024**3).toFixed(1)} GB`:''].filter(Boolean).join(' · ')
 
@@ -50,6 +48,18 @@ export default function App() {
   const [editDraft,setEditDraft]=useState<FilmEdit>({})
   const [syncProgress,setSyncProgress]=useState<SyncProgress|null>(null)
   const [syncRetries,setSyncRetries]=useState(0)
+  const [count,setCount]=useState(0)
+  const [genres,setGenres]=useState<string[]>([])
+  const [nextOffset,setNextOffset]=useState<number|null>(null)
+  const [loadingMore,setLoadingMore]=useState(false)
+  const [moreFailed,setMoreFailed]=useState(false)
+  const [catalogRevision,setCatalogRevision]=useState(0)
+  const sentinel=useRef<HTMLDivElement>(null)
+  const requestVersion=useRef(0)
+  const loadedLimit=useRef(16)
+  const requestingMore=useRef(false)
+  const readable=Boolean(viewer.public || (viewer.connected && viewer.library))
+  const filters=useMemo(()=>({q:query,genre,favorite:favoritesOnly,sort:sortOrder}),[query,genre,favoritesOnly,sortOrder])
   const syncing=syncProgress?.status==='running'
 
   function showError(error:unknown) {
@@ -62,14 +72,12 @@ export default function App() {
       const user=await backend.session()
       setViewer(user)
       setFolderUrl(current=>current || user.default_folder_url || '')
-      if(user.public || (user.connected && user.library)) {
-        const data=await backend.catalog()
-        setFilms(data.movies)
-        setSyncProgress(data.sync)
-      } else {
+      if(!user.public && !(user.connected && user.library)) {
         setFilms([])
         setSyncProgress(null)
+        setCount(0)
       }
+      setCatalogRevision(previous=>previous+1)
     } catch(error) {showError(error)}
     finally {setLoading(false)}
   }
@@ -83,40 +91,68 @@ export default function App() {
     void loadSession()
   },[])
 
-  async function applySync(result:SyncResult,signal?:AbortSignal) {
-    if(signal?.aborted)return
-    if(result.status==='completed') {
-      const data=await backend.catalog(signal)
-      if(signal?.aborted)return
-      setFilms(data.movies)
-    } else if(result.movies.length) {
-      setFilms(previous=>{
-        const updated=new Map(previous.map(film=>[film.id,film]))
-        for(const film of result.movies)updated.set(film.id,film)
-        return [...updated.values()].sort(byTitle)
-      })
-    }
-    setSyncProgress(result)
+  function applyCatalog(data:CatalogPage) {
+    setFilms(data.movies)
+    setCount(data.count)
+    setGenres(data.genres)
+    setNextOffset(data.next_offset)
+    setSyncProgress(data.sync)
   }
 
   useEffect(()=>{
-    if(!viewer.can_manage || syncProgress?.status!=='running')return
+    if(!readable)return
+    const version=++requestVersion.current
     const controller=new AbortController()
-    const timer=window.setTimeout(async()=>{
+    loadedLimit.current=16
+    requestingMore.current=false
+    setLoading(true);setLoadingMore(false);setMoreFailed(false);setNextOffset(null)
+    let timer:number
+    let retries=0
+    async function refresh() {
+      if(requestingMore.current){timer=window.setTimeout(refresh,1500);return}
+      const limit=loadedLimit.current
       try {
-        const result=await backend.sync(false,controller.signal)
-        await applySync(result,controller.signal)
-        setSyncRetries(0)
+        const data=await backend.catalog(filters,0,limit,controller.signal)
+        if(controller.signal.aborted)return
+        if(loadedLimit.current===limit)applyCatalog(data)
+        retries=0;setSyncRetries(0);setLoading(false)
+        if(data.sync?.status==='running')timer=window.setTimeout(refresh,1500)
       } catch(error) {
         if(controller.signal.aborted)return
         const temporary=error instanceof TypeError || (error instanceof backend.ApiError && [429,500,502,503,504,524].includes(error.status || 0))
-        if(temporary && syncRetries<8){setSyncRetries(previous=>previous+1);return}
-        setSyncProgress(null)
-        showError(error)
+        if(temporary && retries<8){retries+=1;setSyncRetries(retries);timer=window.setTimeout(refresh,Math.min(15000,1000*2**(retries-1)));return}
+        showError(error);setLoading(false)
       }
-    },syncRetries?Math.min(15000,1000*2**(syncRetries-1)):350)
-    return ()=>{window.clearTimeout(timer);controller.abort()}
-  },[syncProgress,syncRetries,viewer.can_manage])
+    }
+    timer=window.setTimeout(refresh,query?250:0)
+    return ()=>{window.clearTimeout(timer);controller.abort();if(requestVersion.current===version)requestVersion.current+=1}
+  },[readable,filters,catalogRevision])
+
+  async function loadMore() {
+    if(nextOffset===null || requestingMore.current)return
+    const version=requestVersion.current
+    requestingMore.current=true;setLoadingMore(true);setMoreFailed(false)
+    try {
+      const data=await backend.catalog(filters,nextOffset)
+      if(requestVersion.current!==version)return
+      setFilms(previous=>{
+        const updated=new Map(previous.map(film=>[film.id,film]))
+        for(const film of data.movies)updated.set(film.id,film)
+        return [...updated.values()]
+      })
+      loadedLimit.current=Math.min(2000,nextOffset+16)
+      setCount(data.count);setGenres(data.genres);setNextOffset(data.next_offset)
+    } catch(error){if(requestVersion.current===version){setMoreFailed(true);showError(error)}}
+    finally{if(requestVersion.current===version){requestingMore.current=false;setLoadingMore(false)}}
+  }
+
+  useEffect(()=>{
+    const element=sentinel.current
+    if(!element || loading || loadingMore || moreFailed || nextOffset===null)return
+    const observer=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting))void loadMore()},{rootMargin:'400px'})
+    observer.observe(element)
+    return ()=>observer.disconnect()
+  },[nextOffset,loading,loadingMore,moreFailed,filters])
 
   const groups=useMemo(()=>{
     const grouped=new Map<string,Film[]>()
@@ -125,18 +161,14 @@ export default function App() {
   },[films])
   const versions=selected?groups.find(group=>group.some(film=>film.id===selected.id)) || [selected]:[]
 
-  const genres=useMemo(()=>[...new Set(films.flatMap(genresOf))].sort((first,second)=>first.localeCompare(second,'es')),[films])
-  const filtered=useMemo(()=>groups.filter(group=>group.some(film=>{
-    const text=normalize([film.title,film.year,film.director,film.country,...(film.cast || []),film.genre,film.filename].join(' '))
-    return (!query || text.includes(normalize(query))) && (!genre || genresOf(film).includes(genre)) && (!favoritesOnly || film.favorite)
-  })).sort((first,second)=>sortOrder==='popularity'?(second[0].popularity ?? -1)-(first[0].popularity ?? -1) || byTitle(first[0],second[0]):sortOrder==='year'?Number(second[0].year)-Number(first[0].year) || byTitle(first[0],second[0]):byTitle(first[0],second[0])),[groups,query,genre,favoritesOnly,sortOrder])
+  const filtered=groups
 
   const close=()=>{setSelected(null);setDialog(null)}
   const clearFilters=()=>{setQuery('');setGenre('')}
 
   async function startSync() {
     setWorking(true);setError('');setSyncRetries(0)
-    try {await applySync(await backend.sync(true))}
+    try {setSyncProgress(await backend.sync(true));setCatalogRevision(previous=>previous+1)}
     catch(error){showError(error)}
     finally{setWorking(false)}
   }
@@ -148,9 +180,8 @@ export default function App() {
     try {
       await backend.setLibrary(folderUrl)
       const user=await backend.session()
-      const data=await backend.catalog()
-      setViewer(user);setFilms(data.movies);setSyncProgress(null);setDialog(null)
-      await applySync(await backend.sync(true))
+      setViewer(user);setDialog(null)
+      setSyncProgress(await backend.sync(true));setCatalogRevision(previous=>previous+1)
     } catch(error){showError(error)}
     finally{setWorking(false)}
   }
@@ -160,6 +191,7 @@ export default function App() {
       await backend.edit(film.id,{favorite:!film.favorite})
       setFilms(previous=>previous.map(item=>item.id===film.id?{...item,favorite:!film.favorite}:item))
       setSelected(previous=>previous?.id===film.id?{...previous,favorite:!film.favorite}:previous)
+      if(favoritesOnly)setCatalogRevision(previous=>previous+1)
     } catch(error){showError(error)}
   }
 
@@ -172,6 +204,7 @@ export default function App() {
       const updated={...selected,...editDraft}
       setFilms(previous=>previous.map(film=>film.id===selected.id?updated:film))
       setSelected(updated);setDialog(null)
+      setCatalogRevision(previous=>previous+1)
     } catch(error){showError(error)}
     finally{setWorking(false)}
   }
@@ -204,7 +237,7 @@ export default function App() {
     {error && <div className="error-banner" role="alert"><span>{error}</span>{drivePermissionMissing && <a href="/auth/login">Volver a autorizar Drive</a>}<button onClick={()=>setError('')} aria-label="Cerrar error"><X size={18}/></button></div>}
     <main>
       <div className="catalog-heading">
-        <h1>{favoritesOnly?'Favoritos':'Películas'} <span>{filtered.length}</span></h1>
+        <h1>{favoritesOnly?'Favoritos':'Películas'} <span>{count}</span></h1>
         {viewer.connected && viewer.library && <button className="secondary-button" onClick={()=>void startSync()} disabled={working || syncing}><RefreshCw size={16} className={syncing?'spin':''}/>{syncing?'Sincronizando':'Sincronizar'}</button>}
       </div>
       <div className="catalog-filters">
@@ -223,7 +256,11 @@ export default function App() {
         filtered.length ? <div className="movie-grid">{filtered.map(group=>{const film=group[0];return <article className="movie-card" key={filmKey(film)}>
           <button className="poster-button" onClick={()=>setSelected(film)} aria-label={`Ver ficha de ${film.title}`}><Poster film={film}/>{group.length>1 && <span className="version-count">{group.length} versiones</span>}</button>
           <div className="movie-meta"><div><button className="movie-title" onClick={()=>setSelected(film)}>{film.title}</button><p>{[film.year,film.country].filter(Boolean).join(' · ')}</p></div>{viewer.can_manage && <button className={film.favorite?'favorite-button saved':'favorite-button'} onClick={()=>void toggleFavorite(film)} aria-label={`${film.favorite?'Quitar':'Agregar'} ${film.title} ${film.favorite?'de':'a'} favoritos`} aria-pressed={film.favorite}><Heart size={18} fill={film.favorite?'currentColor':'none'}/></button>}</div>
-        </article>})}</div> : <div className="empty-state"><p>{syncing?'Buscando películas…':favoritesOnly?'No hay favoritos.':films.length?'No se encontraron películas.':viewer.public?'No hay películas cargadas.':!viewer.connected?'Conectá Google Drive para cargar tus películas.':'No hay películas cargadas.'}</p>{!viewer.public && (!viewer.connected || !viewer.library)?<button className="primary-button" onClick={()=>setDialog('drive')}>{viewer.connected?'Elegir carpeta':'Conectar Drive'}</button>:viewer.can_manage && !syncing && !films.length && <button className="primary-button" onClick={()=>void startSync()} disabled={working}>Sincronizar</button>}</div>}
+        </article>})}</div> : <div className="empty-state"><p>{syncing?'Buscando películas…':favoritesOnly?'No hay favoritos.':query || genre?'No se encontraron películas.':viewer.public?'No hay películas cargadas.':!viewer.connected?'Conectá Google Drive para cargar tus películas.':'No hay películas cargadas.'}</p>{!viewer.public && (!viewer.connected || !viewer.library)?<button className="primary-button" onClick={()=>setDialog('drive')}>{viewer.connected?'Elegir carpeta':'Conectar Drive'}</button>:viewer.can_manage && !syncing && !count && !query && !genre && !favoritesOnly && <button className="primary-button" onClick={()=>void startSync()} disabled={working}>Sincronizar</button>}</div>}
+      <div ref={sentinel} className="catalog-more">
+        {loadingMore && <span role="status"><Loader2 size={18} className="spin"/>Cargando más películas…</span>}
+        {!loading && !loadingMore && nextOffset!==null && <button className="secondary-button" onClick={()=>void loadMore()}>{moreFailed?'Reintentar':'Cargar 16 más'}</button>}
+      </div>
     </main>
     {selected && !dialog && <Modal label={selected.title} onClose={close} wide>
       <div className="film-details"><Poster film={selected}/><div className="film-description">

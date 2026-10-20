@@ -16,7 +16,7 @@ import secrets
 import subprocess
 import time
 import unicodedata
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlparse
 
@@ -68,7 +68,7 @@ SYNC_PAGE_SIZE = 100
 SYNC_FOLDER_BATCH = 10
 SYNC_METADATA_BATCH = 10
 SYNC_ITEM_LIMIT = 2000
-METADATA_VERSION = 3
+METADATA_VERSION = 4
 TMDB_CACHE_TTL = 24 * 60 * 60
 TRANSCODE_SLOTS = asyncio.Semaphore(2)
 SUBTITLE_EXT = {'.srt', '.vtt', '.ass', '.ssa'}
@@ -157,9 +157,13 @@ async def lifespan(_: FastAPI):
     if CLIENT_ID and CLIENT_SECRET:
         cipher()
     await initialize_database()
+    worker = asyncio.create_task(resume_sync_jobs())
     try:
         yield
     finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
         engine.dispose()
 
 
@@ -210,10 +214,16 @@ def folder_id_from_input(value: str) -> str:
 
 def filename_title(name: str) -> tuple[str, str]:
     title = re.sub(r'\.(mp4|webm|m4v|mkv|avi|mov)$', '', name, flags=re.I)
+    title = re.sub(r'^\d{1,3}[.)]\s+', '', title)
     match = re.search(r'(?<!\d)(19\d{2}|20\d{2})(?!\d)', title)
     year = match.group(1) if match else ''
     title = re.split(r'(?i)\b(?:19\d{2}|20\d{2}|1080p|2160p|720p|4k|bluray|webrip|web-dl|h264|x264|h265|x265|aac|hevc)\b', title)[0]
     return re.sub(r'\s+', ' ', re.sub(r'[._\[\](){}-]+', ' ', title)).strip() or name, year
+
+
+def normalized(value: str) -> str:
+    return ''.join(character for character in unicodedata.normalize('NFD', value)
+                   if not unicodedata.combining(character)).casefold()
 
 
 def is_video(item: dict) -> bool:
@@ -611,18 +621,48 @@ def compose_movies(user_id: str, file_ids: list[str] | None = None) -> list[dict
     result = []
     for row in movies:
         item = json.loads(row['metadata'])
+        prefix = re.match(r'^(\d{1,3})[.)]\s+', item.get('filename', ''))
+        if prefix:
+            title, _ = filename_title(item['filename'])
+            if item['title'] == f'{prefix.group(1)} {title}':
+                item['title'] = title
         item.update(edits.get(row['file_id'], {}))
         result.append(item)
     return sorted(result, key=lambda movie:movie['title'].casefold())
 
 
 @app.get('/api/movies')
-async def movies(request: Request):
+async def movies(request: Request, offset: int = Query(0, ge=0), limit: int = Query(16, ge=1, le=2000),
+                 q: str = '', genre: str = '', favorite: bool = False,
+                 sort: str = Query('title', pattern='^(title|year|popularity)$')):
     user = await require_reader(request)
     library = require_library(user['user_id'])
     result = compose_movies(user['user_id'])
-    return {'movies':result, 'folder':library['folder_name'],
-            'synced_at':library['synced_at'], 'count':len(result),
+    genres = sorted({name.strip() for movie in result for name in movie.get('genre', '').split(',') if name.strip()})
+    groups = {}
+    for movie in result:
+        key = f"tmdb:{movie['tmdbId']}" if movie.get('tmdbId') else (normalized(movie['title']), movie.get('year', ''))
+        groups.setdefault(key, []).append(movie)
+    query = normalized(q)
+    filtered = [group for group in groups.values() if any(
+        (not query or query in normalized(' '.join(str(movie.get(field) or '') for field in
+            ('title', 'year', 'director', 'country', 'cast', 'genre', 'filename'))))
+        and (not genre or genre in [name.strip() for name in movie.get('genre', '').split(',')])
+        and (not favorite or movie.get('favorite')) for movie in group)]
+    def ordering(group):
+        movie = group[0]
+        title = normalized(movie['title'])
+        if sort == 'year':
+            return (-int(movie.get('year') or 0), title, movie['id'])
+        if sort == 'popularity':
+            return (-(movie.get('popularity') if movie.get('popularity') is not None else -1), title, movie['id'])
+        return (title, movie['id'])
+    filtered.sort(key=ordering)
+    page = filtered[offset:offset + limit]
+    next_offset = offset + len(page)
+    return {'movies': [movie for group in page for movie in group], 'folder':library['folder_name'],
+            'synced_at':library['synced_at'], 'count':len(filtered), 'genres': genres,
+            'next_offset': next_offset if next_offset < len(filtered) else None,
             'sync': library_sync(user['user_id'], library['folder_name'])}
 
 
@@ -631,6 +671,45 @@ async def sync_movies(request: Request, start: bool = False):
     is_csrf_safe(request)
     user = await require_manager(request)
     library = require_library(user['user_id'])
+    return await advance_sync(user, library, start)
+
+
+async def resume_sync_jobs_once():
+    with db() as con:
+        jobs = con.execute(text('SELECT user_id,state FROM sync_jobs')).mappings().all()
+    for job in jobs:
+        state = json.loads(job['state'])
+        if state['status'] == 'completed' and (not TMDB_TOKEN or state.get('metadata_version') == METADATA_VERSION):
+            continue
+        try:
+            library = require_library(job['user_id'])
+            with db() as con:
+                shared = con.execute(text('SELECT * FROM public_library WHERE user_id=:user_id'),
+                                     {'user_id': job['user_id']}).mappings().first()
+                session = con.execute(text('SELECT * FROM sessions WHERE user_id=:user_id ORDER BY created_at DESC LIMIT 1'),
+                                      {'user_id': job['user_id']}).mappings().first()
+                if state['status'] == 'completed':
+                    state.update(status='running', phase='metadata', enriched=0, metadata_version=METADATA_VERSION)
+                    con.execute(text('UPDATE sync_jobs SET state=:state WHERE user_id=:user_id AND state=:previous'),
+                                {'state': json.dumps(state), 'user_id': job['user_id'], 'previous': job['state']})
+            credentials = shared or session
+            if credentials:
+                user = await authorize_credentials(dict(credentials), shared=bool(shared))
+                await advance_sync(user, library)
+        except Exception:
+            logging.getLogger(__name__).exception('No se pudo continuar la sincronización guardada')
+
+
+async def resume_sync_jobs():
+    while True:
+        await asyncio.sleep(5)
+        try:
+            await resume_sync_jobs_once()
+        except Exception:
+            logging.getLogger(__name__).exception('No se pudieron consultar las sincronizaciones pendientes')
+
+
+async def advance_sync(user: dict, library: dict, start: bool = False):
     user_id = user['user_id']
     lease_id = secrets.token_urlsafe(24)
     with db() as con:

@@ -6,6 +6,9 @@ from backend.main import filename_title, folder_id_from_input, is_video, RANGE_R
     ('Perfect.Days.2023.1080p.mkv','Perfect Days','2023'),
     ('La.Vida.Es.Bella.1997.bluray.mp4','La Vida Es Bella','1997'),
     ('Stalker.webm','Stalker',''),
+    ('38. Antigone (2019).mkv','Antigone','2019'),
+    ('03) Perfect.Days.2023.mkv','Perfect Days','2023'),
+    ('12 Angry Men (1957).mp4','12 Angry Men','1957'),
 ])
 def test_title(filename,title,year):
     assert filename_title(filename)==(title,year)

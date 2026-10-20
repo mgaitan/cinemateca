@@ -27,7 +27,7 @@ El README describe el comportamiento implementado y cómo ejecutarlo. Esta hoja 
 - Verificado en navegador: agrupación y elección de versiones, fichas con créditos, audio AAC y subtítulos externos activables/desactivables; grilla y modales en móvil sin desbordamiento horizontal.
 - No hay recodificación de video: HEVC u otros códecs siguen dependiendo del navegador. La conversión de audio no garantiza compatibilidad de cualquier archivo.
 - No se extraen subtítulos incrustados en MKV ni se eliminan subtítulos quemados en la imagen.
-- La sincronización necesita una pestaña del propietario abierta para avanzar; conserva el cursor al cerrarla. Se limita a cinco niveles y 2000 elementos.
+- La sincronización continúa en el servidor sin una pestaña abierta; tras una suspensión del hosting retoma el cursor guardado. Se limita a cinco niveles y 2000 elementos.
 - Los subtítulos externos se limitan a 2 MB y deben poder asociarse a la película. Se respetan las restricciones de descarga de Drive.
 - Un build subido no equivale a despliegue listo: comprobar su estado final y `/health`. Se observaron fallos temporales de DNS hacia Turso durante la verificación de réplicas en FastAPI Cloud; el reintento no reemplaza resolver una caída persistente del proveedor.
 
@@ -44,7 +44,8 @@ El README describe el comportamiento implementado y cómo ejecutarlo. Esta hoja 
 - [ ] Continuidad de reproducción y preferencias de idioma/subtítulos.
 - [ ] Extracción de pistas incrustadas y selección de pistas de audio.
 - [ ] Evaluar transcodificación de video separada del servidor web cuando el navegador no admita el códec original.
-- [ ] Sincronización incremental o desatendida, solo si hace falta prescindir de una pestaña abierta.
+- [x] Continuación de sincronizaciones pendientes en el servidor, sin una pestaña abierta.
+- [ ] Sincronización incremental de cambios de Drive.
 - [ ] Búsqueda avanzada, etiquetas personales y precarga.
 - [ ] Observabilidad y límites de solicitudes para el acceso público.
 - [ ] Automatización de pruebas y despliegue con secretos configurados fuera del repositorio.

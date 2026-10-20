@@ -1,4 +1,4 @@
-import type { Session, Film, FilmEdit, Subtitle, SyncProgress, SyncResult } from './types'
+import type { Session, FilmEdit, Subtitle, SyncResult, CatalogPage, CatalogQuery } from './types'
 export class ApiError extends Error {
   constructor(message:string, public code?:string, public status?:number) { super(message) }
 }
@@ -17,7 +17,7 @@ async function api<T>(path:string, options?:RequestInit):Promise<T> {
   return response.json()
 }
 export const session=()=>api<Session>('/api/me')
-export const catalog=(signal?:AbortSignal)=>api<{movies:Film[],folder:string,count:number,synced_at:number,sync:SyncProgress|null}>('/api/movies',{signal})
+export const catalog=(filters:CatalogQuery,offset=0,limit=16,signal?:AbortSignal)=>api<CatalogPage>(`/api/movies?${new URLSearchParams({...filters,favorite:String(filters.favorite),offset:String(offset),limit:String(limit)})}`,{signal})
 export const setLibrary=(url:string)=>api<{folder_id:string,folder_name:string}>('/api/library',{method:'POST',body:JSON.stringify({url})})
 export const sync=(start=false,signal?:AbortSignal)=>api<SyncResult>(`/api/sync?start=${start}`,{method:'POST',signal})
 export const edit=(id:string,changes:FilmEdit)=>api<{ok:boolean}>(`/api/movies/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify(changes)})

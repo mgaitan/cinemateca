@@ -44,6 +44,8 @@ h2 {font-size:23px;line-height:1.25;font-weight:650;overflow-wrap:anywhere;paddi
 .error-banner button {background:none;border:0;padding:3px;display:flex}
 .movie-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px 22px}
 .movie-card {min-width:0}
+.catalog-more {display:flex;justify-content:center;padding-top:28px;min-height:56px}
+.catalog-more span {display:flex;align-items:center;gap:8px;color:#656860;font-size:13px}
 .poster-button {position:relative;border:0;padding:0;width:100%;display:block;border-radius:6px;overflow:hidden;background:#dedfd7}
 .version-count {position:absolute;bottom:10px;right:10px;padding:5px 8px;border-radius:4px;background:#202724e8;color:#fff;font-size:12px}
 .poster {width:100%;aspect-ratio:2/3;position:relative;overflow:hidden;border-radius:6px;background:#e0e2d9}

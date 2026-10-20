@@ -29,4 +29,6 @@ export interface Session { connected: boolean; configured: boolean; public?: boo
 export interface Subtitle { id: string; label: string; src: string }
 export interface SyncProgress { status: 'running' | 'completed'; phase: 'scan' | 'metadata' | 'completed'; count: number; processed: number; enriched: number; limited: boolean; folder: string }
 export interface SyncResult extends SyncProgress { movies: Film[] }
+export interface CatalogPage { movies: Film[]; folder: string; count: number; synced_at: number; sync: SyncProgress|null; genres: string[]; next_offset: number|null }
+export interface CatalogQuery { q: string; genre: string; favorite: boolean; sort: string }
 export type FilmEdit = Partial<Pick<Film, 'title' | 'year' | 'director' | 'overview' | 'genre' | 'poster' | 'backdrop' | 'collection' | 'favorite' | 'featured'>>

@@ -84,6 +84,120 @@ def test_library_is_private_per_user(client, drive):
     assert client.get('/api/stream/test_movie_12345?download=true').status_code == 404
 
 
+def test_catalog_pages_groups_and_filters_entire_library(client, drive):
+    user_id = connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    films = [{'id': f'movie_{index:03}_12345', 'title': f'Película {index:03}', 'year': str(2000 + index),
+              'genre': 'Drama' if index < 16 else 'Comedia', 'favorite': index == 32,
+              'popularity': index, 'director': 'Directora especial' if index == 32 else ''}
+             for index in range(33)]
+    films.append({**films[0], 'id': 'version_second_12345'})
+    with main.db() as connection:
+        main.save_movies(connection, user_id, films)
+    first = client.get('/api/movies').json()
+    assert first['count'] == 33
+    assert first['next_offset'] == 16
+    assert len(first['movies']) == 17
+    assert first['genres'] == ['Comedia', 'Drama']
+    second = client.get('/api/movies?offset=16').json()
+    third = client.get('/api/movies?offset=32').json()
+    assert len(second['movies']) == 16
+    assert third['next_offset'] is None
+    assert len(third['movies']) == 1
+    assert not {movie['id'] for movie in first['movies']} & {movie['id'] for movie in second['movies']}
+    for query in ('q=directora%20especial', 'favorite=true', 'q=pelicula%20032'):
+        page = client.get('/api/movies?' + query).json()
+        assert page['count'] == 1
+        assert page['movies'][0]['id'] == films[32]['id']
+    assert client.get('/api/movies?genre=Comedia').json()['count'] == 17
+    for order in ('year', 'popularity'):
+        assert client.get('/api/movies?sort=' + order).json()['movies'][0]['id'] == films[32]['id']
+    for query in ('offset=-1', 'limit=0', 'limit=2001', 'sort=invalid'):
+        assert client.get('/api/movies?' + query).status_code == 422
+
+
+def test_catalog_survives_restart_and_does_not_scan_drive(client, drive, monkeypatch):
+    connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    client.post('/api/sync')
+    before = client.get('/api/movies').json()
+
+    async def unexpected_request(*args, **kwargs):
+        pytest.fail('Reading the saved library must not contact Drive')
+
+    monkeypatch.setattr(main, 'google_get', unexpected_request)
+    main.engine.dispose()
+    main.init_db()
+    assert client.get('/api/movies').json() == before
+
+
+@pytest.mark.parametrize('shared', [False, True])
+def test_server_resumes_saved_sync_without_browser(client, monkeypatch, shared):
+    import asyncio
+
+    connect_user(client)
+    requests = []
+
+    async def google_get(url, token, params=None):
+        if url != main.DRIVE_URL:
+            return {'mimeType': main.FOLDER_MIME, 'name': 'Biblioteca'}
+        requests.append(params.get('pageToken'))
+        if not params.get('pageToken'):
+            return {'files': [{'id': 'movie_first_12345', 'name': 'First.mp4'}], 'nextPageToken': 'next'}
+        return {'files': [{'id': 'movie_second_12345', 'name': 'Second.mp4'}]}
+
+    monkeypatch.setattr(main, 'google_get', google_get)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    assert client.post('/api/sync').json()['status'] == 'running'
+    if shared:
+        assert client.post('/api/sharing', json={'enabled': True}).status_code == 200
+        client.post('/auth/logout')
+    main.engine.dispose()
+    asyncio.run(main.resume_sync_jobs_once())
+    saved = client.get('/api/movies').json()
+    assert saved['count'] == 2
+    assert saved['sync']['status'] == 'completed'
+    assert saved['synced_at'] > 0
+    asyncio.run(main.resume_sync_jobs_once())
+    assert requests == [None, 'next']
+
+
+def test_server_repairs_numbered_titles_without_rescanning(client, drive, monkeypatch):
+    import asyncio
+    import httpx
+
+    user_id = connect_user(client)
+    client.post('/api/library', json={'url': 'test_folder_12345'})
+    client.post('/api/sync')
+    with main.db() as connection:
+        main.save_movies(connection, user_id, [{'id': 'test_movie_12345', 'title': '38 Antigone',
+                                               'filename': '38. Antigone (2019).mkv', 'year': '2019', 'poster': ''}])
+        state = json.loads(connection.execute(text('SELECT state FROM sync_jobs')).scalar_one())
+        state['metadata_version'] = main.METADATA_VERSION - 1
+        connection.execute(text('UPDATE sync_jobs SET state=:state'), {'state': json.dumps(state)})
+    monkeypatch.setattr(main, 'TMDB_TOKEN', 'tmdb-test')
+    searches = []
+
+    def respond(request):
+        searches.append(request.url.params['query'])
+        return httpx.Response(200, json={'results': [{'poster_path': '/antigone.jpg'}]})
+
+    async def unexpected_scan(*args, **kwargs):
+        pytest.fail('Metadata repairs must reuse the stored Drive listing')
+
+    monkeypatch.setattr(main, 'google_get', unexpected_scan)
+    async_client = httpx.AsyncClient
+    monkeypatch.setattr(main.httpx, 'AsyncClient',
+                        lambda **options: async_client(transport=httpx.MockTransport(respond), **options))
+    asyncio.run(main.resume_sync_jobs_once())
+    film = client.get('/api/movies').json()['movies'][0]
+    assert searches == ['Antigone']
+    assert film['title'] == 'Antigone'
+    assert film['poster'].endswith('/antigone.jpg')
+    client.patch('/api/movies/test_movie_12345', json={'title': 'Mi Antígona'})
+    assert client.get('/api/movies').json()['movies'][0]['title'] == 'Mi Antígona'
+
+
 @pytest.mark.parametrize('download', [False, True])
 def test_video_stream_and_download(client, drive, monkeypatch, download):
     import httpx

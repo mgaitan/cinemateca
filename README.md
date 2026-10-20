@@ -135,15 +135,19 @@ Después del despliegue verificá `/health`, pósters, búsqueda, categorías po
 
 ## Sincronización por pasos
 
-`POST /api/sync?start=true` inicia una exploración nueva o reanuda una que ya está en curso. Cada `POST /api/sync` siguiente procesa hasta 10 páginas de distintas carpetas de Drive (100 elementos por página, consultadas en paralelo) o un lote de hasta 10 búsquedas TMDB. La respuesta informa estado, fase, cantidades y películas actualizadas. El navegador solicita el paso siguiente y muestra los resultados a medida que llegan. Las lecturas y escrituras de la caché TMDB también se agrupan para reducir los viajes a la base remota.
+`POST /api/sync?start=true` inicia una exploración nueva o reanuda una que ya está en curso. Cada paso procesa hasta 10 páginas de distintas carpetas de Drive (100 elementos por página, consultadas en paralelo) o un lote de hasta 10 búsquedas TMDB. El servidor continúa los trabajos pendientes cada cinco segundos y el navegador consulta el avance, incluso para visitantes del catálogo público. Las lecturas y escrituras de la caché TMDB también se agrupan para reducir los viajes a la base remota.
 
-El cursor y el avance se guardan en Turso, por lo que recargar la página permite continuar. No se necesita un worker ni mantener una petición abierta durante toda la operación. Una reserva temporal en la base evita procesar el mismo paso desde dos pestañas o réplicas a la vez. El navegador reintenta hasta ocho veces los fallos temporales de red y respuestas 429/500/502/503/504/524, con esperas crecientes de hasta 15 segundos. Si no se recupera la conexión, se informa el error y se puede reanudar desde el último paso guardado.
+El catálogo, el cursor y el avance se guardan en Turso sin vencimiento: volver a entrar no inicia otra exploración. Una tarea del proceso continúa las sincronizaciones autorizadas usando las credenciales guardadas, aunque se cierre la pestaña. Si el hosting suspende o reemplaza el proceso, el siguiente arranque recupera el cursor. Una reserva temporal en la base evita procesar el mismo paso desde dos réplicas a la vez. El servidor reintenta los trabajos pendientes después de errores; si Google revoca el acceso, el propietario debe volver a autorizar Drive. El navegador reintenta hasta ocho veces los fallos temporales de lectura, con esperas crecientes de hasta 15 segundos.
 
 El catálogo anterior permanece disponible durante la exploración; los archivos ausentes se eliminan al terminar correctamente. Si se alcanza un límite de exploración, se informa en la interfaz y se conservan los archivos que no se alcanzaron a revisar. Reconfirmar la misma carpeta no borra el catálogo ni reinicia el avance.
 
 Las categorías son géneros de TMDB (Drama, Comedia, etc.) cuando hay coincidencias; no se usan las carpetas como filtro. Se puede ordenar por título, año o popularidad TMDB, dejando al final las películas sin ese dato. La popularidad es un puntaje de actividad, no una calificación; se actualiza al sincronizar con una caché de hasta 24 horas. La caché tiene versión para completar campos nuevos en la siguiente sincronización. El propietario puede editar géneros, títulos y pósters desde la ficha. Los favoritos y las ediciones se conservan entre sincronizaciones.
 
+Los prefijos de enumeración como `38. Antigone (2019).mkv` se omiten al buscar títulos. Los cambios de versión de metadatos actualizan la biblioteca guardada en segundo plano, sin volver a explorar Drive, y respetan las ediciones manuales.
+
 La grilla agrupa archivos por ID de TMDB, o por título y año cuando falta ese ID. Cada película muestra un solo póster, año, países y cantidad de versiones. En la ficha se puede elegir el archivo/edición, con su nombre, subcarpeta, duración y tamaño. Reproducir, descargar y abrir Drive usan la versión elegida; los originales no se borran ni se fusionan.
+
+`GET /api/movies` devuelve páginas de 16 películas agrupadas con todas sus versiones. Acepta `offset`, `limit`, `q`, `genre`, `favorite` y `sort` (`title`, `year`, `popularity`), e informa `count`, `genres` y `next_offset`. Los filtros y el orden se aplican a toda la biblioteca antes de paginar. El navegador solicita la siguiente página al acercarse al final del listado; también ofrece un botón para cargar más. El servidor lee el índice guardado para armar las páginas, sin consultar Drive.
 
 ## Reproducción, sonido y subtítulos
 
@@ -168,7 +172,7 @@ npm --prefix frontend run build
 
 Los tests comprueban títulos, enlaces, rangos, catálogo, aislamiento entre usuarios, publicación y revocación de acceso, restricciones de escritura, renovación de credenciales sin sesión, subtítulos, créditos TMDB, cifrado, CSRF, estado OAuth y caché con SQLite y el driver libSQL. Una prueba genera audio E-AC-3 y comprueba su conversión real a AAC estéreo no silencioso. Compilá el frontend antes para comprobar también los estáticos. Las pruebas usan bases temporales, sin tocar el catálogo real.
 
-El backend transmite desde Drive sin copiar películas al disco y reenvía `Range` para búsquedas cuando Google lo respeta. Hay que verificar permisos, cuotas, videos grandes y límites del hosting con la carpeta real. La sincronización recorre hasta 5 niveles y 2000 elementos y busca metadatos para todas las películas encontradas, en lotes pequeños. La pestaña debe permanecer abierta para avanzar; al volver se puede reanudar.
+El backend transmite desde Drive sin copiar películas al disco y reenvía `Range` para búsquedas cuando Google lo respeta. Hay que verificar permisos, cuotas, videos grandes y límites del hosting con la carpeta real. La sincronización recorre hasta 5 niveles y 2000 elementos y busca metadatos para todas las películas encontradas, en lotes pequeños. Avanza mientras el proceso del servidor esté activo; tras una suspensión del hosting retoma el cursor guardado.
 
 `preview.html` conserva el prototipo anterior como demo autónoma, fuera del despliegue. Imágenes y metadatos externos conservan sus condiciones de uso.
 
