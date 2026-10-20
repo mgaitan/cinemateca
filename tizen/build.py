@@ -7,7 +7,7 @@ def build(output: Path | None = None) -> Path:
     destination = output or source / 'dist' / 'cinemateca.wgt'
     destination.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(destination, 'w', compression=ZIP_DEFLATED) as widget:
-        for name in ('config.xml', 'index.html', 'style.css', 'app.js'):
+        for name in ('config.xml', 'index.html', 'style.css', 'subtitles.js', 'app.js'):
             widget.write(source / name, name)
     return destination
 

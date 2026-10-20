@@ -28,10 +28,13 @@
     </section>
   </main>
   <section id="playback" hidden aria-label="Reproductor">
+    <div id="subtitle-overlay" hidden></div>
     <div id="controls" class="player-controls"><h2 id="playing-title"></h2><p id="play-status" role="status"></p><p id="time"></p>
-      <button id="pause" data-focus>Pausar</button><button id="rewind" data-focus>−30 segundos</button><button id="forward" data-focus>+30 segundos</button><button id="subtitles" data-focus>Subtítulos incrustados</button><button id="stop" data-focus>Volver a la ficha</button>
+      <p id="subtitle-status" role="status"></p>
+      <button id="pause" data-focus>Pausar</button><button id="rewind" data-focus>−30 segundos</button><button id="forward" data-focus>+30 segundos</button><label>Subtítulos <select id="subtitles" data-focus><option value="">Desactivados</option></select></label><button id="stop" data-focus>Volver a la ficha</button>
     </div>
   </section>
+  <script src="subtitles.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

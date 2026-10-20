@@ -59,4 +59,6 @@ El README describe el comportamiento implementado y cómo ejecutarlo. Esta hoja 
 - [x] Prototipo con navegación por foco, control remoto, catálogo paginado y AVPlay; validado con APIs simuladas.
 - [ ] Compatibilidad de códecs, subtítulos, pantalla completa y rendimiento en un televisor o SDK real.
 - [x] Manifiesto y generación de `.wgt` sin firma para pruebas con Apps2Samsung.
-- [ ] Firma, instalación y validación en el modelo de TV del usuario; subtítulos externos en el cliente Tizen.
+- [x] Firma e instalación con Apps2Samsung y funcionamiento general confirmado por el usuario en su TV.
+- [x] Selector y renderizado de subtítulos externos en ambos modos y de pistas incrustadas de texto en Original; pruebas automatizadas.
+- [ ] Validar en el TV del usuario los subtítulos de la versión 0.2.0 y registrar modelo/Tizen.

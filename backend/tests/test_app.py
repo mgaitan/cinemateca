@@ -359,7 +359,7 @@ def test_public_cast_tickets_survive_logout_and_respect_sharing(client, drive):
 def test_device_cors_is_limited_to_read_routes(client):
     headers = {'Origin': 'https://receiver.example', 'Access-Control-Request-Method': 'GET',
                'Access-Control-Request-Headers': 'Range'}
-    for path in ('/api/movies', '/api/movies/test_movie_12345', '/api/stream/test_movie_12345', '/api/play/test_movie_12345',
+    for path in ('/api/movies', '/api/movies/test_movie_12345', '/api/movies/test_movie_12345/subtitles', '/api/stream/test_movie_12345', '/api/play/test_movie_12345',
                  '/api/movies/test_movie_12345/subtitles/test_subtitle_12345'):
         response = client.options(path, headers=headers)
         assert response.status_code == 204
@@ -530,7 +530,10 @@ def test_subtitle_discovery_conversion_and_access_control(client, drive, monkeyp
     async_client = httpx.AsyncClient
     monkeypatch.setattr(main.httpx, 'AsyncClient',
                         lambda **options: async_client(transport=httpx.MockTransport(respond), **options))
-    tracks = client.get('/api/movies/test_movie_12345/subtitles').json()['tracks']
+    discovered = client.get('/api/movies/test_movie_12345/subtitles', headers={'Origin': 'null'})
+    assert discovered.headers['access-control-allow-origin'] == '*'
+    assert 'access-control-allow-credentials' not in discovered.headers
+    tracks = discovered.json()['tracks']
     assert [track['id'] for track in tracks] == ['subtitle_123456']
     params = {}
     if casting:

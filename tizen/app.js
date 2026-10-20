@@ -17,7 +17,16 @@
   var offset = 0;
   var duration = 0;
   var generation = 0;
-  var subtitleIndex = -1;
+  var subtitleMovieId = '';
+  var subtitleChoice = '';
+  var subtitleManual = false;
+  var externalTracks = [];
+  var nativeTracks = [];
+  var subtitleCues = {};
+  var nativeCaption = null;
+  var subtitleListRequest = null;
+  var subtitleTextRequest = null;
+  var loadingSubtitle = '';
   var controlsTimer;
   var player = window.webapis && window.webapis.avplay;
 
@@ -29,13 +38,13 @@
     var minutes = Math.floor(seconds / 60);
     return Math.floor(minutes / 60) + ':' + ('0' + minutes % 60).slice(-2) + ':' + ('0' + seconds % 60).slice(-2);
   }
-  function request(path, success, failure) {
+  function request(path, success, failure, raw) {
     var xhr = new XMLHttpRequest();
     xhr.open('GET', server + path);
     xhr.timeout = 45000;
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) {
-        try { success(JSON.parse(xhr.responseText)); }
+        try { success(raw ? xhr.responseText : JSON.parse(xhr.responseText)); }
         catch (error) { failure('No se pudo leer la respuesta del servidor.'); }
       } else if (xhr.status === 401 || xhr.status === 403) {
         failure('Activá el acceso abierto de la biblioteca desde Cinemateca en tu celular o computadora.');
@@ -126,15 +135,121 @@
   function showControls() {
     window.clearTimeout(controlsTimer);
     element('controls').hidden = false;
-    controlsTimer = window.setTimeout(function () { if (playing && !preparing) { element('controls').hidden = true; } }, 6000);
+    positionSubtitles();
+    controlsTimer = window.setTimeout(function () { if (playing && !preparing) { element('controls').hidden = true; positionSubtitles(); } }, 6000);
+  }
+  function positionSubtitles() {
+    element('subtitle-overlay').style.bottom = element('controls').hidden ? '8%' : (element('controls').offsetHeight + 24) + 'px';
+  }
+  function renderSubtitles() {
+    var text = '';
+    if (playing && subtitleChoice.indexOf('external:') === 0) {
+      text = window.CinematecaSubtitles.textAt(subtitleCues[subtitleChoice] || [], position);
+    } else if (playing && subtitleChoice.indexOf('native:') === 0 && nativeCaption && position < nativeCaption.end) {
+      text = nativeCaption.text;
+    }
+    element('subtitle-overlay').textContent = text;
+    element('subtitle-overlay').hidden = !text;
+  }
+  function resetSubtitles() {
+    if (subtitleListRequest) { subtitleListRequest.abort(); }
+    if (subtitleTextRequest) { subtitleTextRequest.abort(); }
+    subtitleListRequest = null; subtitleTextRequest = null; loadingSubtitle = '';
+    subtitleMovieId = ''; subtitleChoice = ''; subtitleManual = false;
+    externalTracks = []; nativeTracks = []; subtitleCues = {}; nativeCaption = null;
+    element('subtitle-status').textContent = '';
+    renderSubtitles();
+  }
+  function spanish(label) {
+    return /(?:^|[. _-])(es|esp|spa|spanish|espa[nñ]ol|castellano|latino)(?:[. _-]|$)/i.test(label);
+  }
+  function chooseSubtitle(choice, manual) {
+    if (manual) { subtitleManual = true; }
+    if (choice !== subtitleChoice) { nativeCaption = null; }
+    subtitleChoice = choice;
+    element('subtitles').value = choice;
+    if (subtitleTextRequest && loadingSubtitle !== choice) {
+      subtitleTextRequest.abort(); subtitleTextRequest = null; loadingSubtitle = '';
+    }
+    renderSubtitles();
+    if (!playing || preparing) { return; }
+    try {
+      player.setSilentSubtitle(true);
+      if (choice.indexOf('native:') === 0) { player.setSelectTrack('TEXT', Number(choice.slice(7))); }
+    } catch (error) { element('subtitle-status').textContent = 'El televisor no pudo activar esta pista incrustada. Probá un subtítulo externo.'; }
+    if (choice.indexOf('external:') !== 0 || subtitleCues[choice] || loadingSubtitle === choice) { return; }
+    var track = externalTracks.filter(function (item) { return 'external:' + item.id === choice; })[0];
+    if (!track) { return; }
+    loadingSubtitle = choice;
+    element('subtitle-status').textContent = 'Cargando ' + track.label + '…';
+    var movieId = subtitleMovieId;
+    subtitleTextRequest = request(track.src, function (source) {
+      if (movieId !== subtitleMovieId || choice !== subtitleChoice) { return; }
+      subtitleTextRequest = null; loadingSubtitle = '';
+      var cues = window.CinematecaSubtitles.parse(source);
+      if (!cues.length) { element('subtitle-status').textContent = 'Este subtítulo no contiene tiempos válidos. Elegí otra pista.'; return; }
+      subtitleCues[choice] = cues;
+      element('subtitle-status').textContent = '';
+      renderSubtitles();
+    }, function (error) {
+      if (movieId !== subtitleMovieId || choice !== subtitleChoice) { return; }
+      subtitleTextRequest = null; loadingSubtitle = '';
+      element('subtitle-status').textContent = 'No se pudo cargar ' + track.label + '. ' + error;
+    }, true);
+  }
+  function refreshSubtitleOptions() {
+    var choices = [{value: '', label: 'Desactivados'}];
+    var chosen = subtitleChoice;
+    nativeTracks.forEach(function (track) {
+      var info = track.extra_info || {};
+      if (typeof info === 'string') { try { info = JSON.parse(info); } catch (error) { info = {}; } }
+      var language = info.track_lang || info.language || 'Pista ' + (track.index + 1);
+      choices.push({value: 'native:' + track.index, label: 'Incrustado: ' + language, spanish: spanish(language)});
+    });
+    externalTracks.forEach(function (track) {
+      choices.push({value: 'external:' + track.id, label: 'Externo: ' + track.label, spanish: spanish(track.label)});
+    });
+    if (!choices.some(function (choice) { return choice.value === chosen; })) { chosen = ''; subtitleManual = false; }
+    if (!subtitleManual) {
+      var preferred = choices.filter(function (choice) { return choice.spanish && choice.value.indexOf('external:') === 0; })[0] ||
+        choices.filter(function (choice) { return choice.spanish; })[0] ||
+        choices.filter(function (choice) { return choice.value.indexOf('external:') === 0; })[0] || choices[1];
+      chosen = preferred ? preferred.value : '';
+    }
+    element('subtitles').textContent = '';
+    choices.forEach(function (choice) {
+      var option = document.createElement('option'); option.value = choice.value; option.textContent = choice.label;
+      element('subtitles').appendChild(option);
+    });
+    chooseSubtitle(chosen, false);
+  }
+  function prepareSubtitles() {
+    nativeTracks = []; nativeCaption = null;
+    if (subtitleMovieId === selected.id) { return; }
+    resetSubtitles(); subtitleMovieId = selected.id;
+    var movieId = subtitleMovieId;
+    element('subtitle-status').textContent = 'Buscando subtítulos externos…';
+    refreshSubtitleOptions();
+    subtitleListRequest = request('/api/movies/' + encodeURIComponent(movieId) + '/subtitles', function (data) {
+      if (movieId !== subtitleMovieId) { return; }
+      subtitleListRequest = null; externalTracks = data.tracks;
+      element('subtitle-status').textContent = externalTracks.length ? '' : 'No se encontraron archivos de subtítulos externos para esta película.';
+      refreshSubtitleOptions();
+    }, function (error) {
+      if (movieId !== subtitleMovieId) { return; }
+      subtitleListRequest = null; element('subtitle-status').textContent = 'No se pudieron buscar subtítulos externos. ' + error;
+    });
   }
   function releasePlayer() {
     generation += 1;
+    nativeCaption = null;
+    element('subtitle-overlay').textContent = ''; element('subtitle-overlay').hidden = true;
     window.clearTimeout(controlsTimer);
     if (player) { try { player.close(); } catch (error) { status('No se pudo cerrar la reproducción.'); } }
   }
   function stopPlayback() {
     releasePlayer(); playing = false; preparing = false;
+    resetSubtitles();
     element('playback').hidden = true; element('library').hidden = false;
     document.body.className = ''; document.documentElement.className = '';
     element('play').focus();
@@ -152,13 +267,11 @@
     offset = compatible ? start : 0;
     position = start * 1000;
     duration = (selected.durationSeconds || selected.duration * 60) * 1000;
-    subtitleIndex = -1;
     playing = true; preparing = true;
     document.body.className = 'playing'; document.documentElement.className = 'playing';
     element('library').hidden = true; element('playback').hidden = false;
     element('playing-title').textContent = selected.title;
-    element('subtitles').textContent = 'Subtítulos incrustados';
-    element('subtitles').disabled = compatible;
+    prepareSubtitles();
     element('time').textContent = clock(position);
     status('Preparando reproducción…'); showControls(); element('pause').focus();
     var url = server + '/api/' + (compatible ? 'play/' : 'stream/') + encodeURIComponent(selected.id);
@@ -174,6 +287,14 @@
           if (current !== generation) { return; }
           position = offset * 1000 + milliseconds;
           element('time').textContent = clock(position) + (duration ? ' / ' + clock(duration) : '');
+          renderSubtitles();
+        },
+        onsubtitlechange: function (milliseconds, text, type) {
+          if (current !== generation || subtitleChoice.indexOf('native:') !== 0) { return; }
+          if (String(type || '0') !== '0') {
+            nativeCaption = null; element('subtitle-status').textContent = 'Esta pista usa subtítulos de imagen. Probá un archivo externo.';
+          } else { nativeCaption = {text: window.CinematecaSubtitles.plainText(text || ''), end: position + Number(milliseconds || 0)}; }
+          renderSubtitles();
         },
         onstreamcompleted: function () { if (current === generation) { stopPlayback(); } },
         onerror: function (error) { if (current === generation) { playbackError(error); } }
@@ -186,6 +307,9 @@
           if (current !== generation) { return; }
           player.play();
           if (paused) { player.pause(); }
+          try { nativeTracks = compatible ? [] : player.getTotalTrackInfo().filter(function (track) { return track.type === 'TEXT'; }); }
+          catch (error) { nativeTracks = []; element('subtitle-status').textContent = 'No se pudieron leer las pistas incrustadas. Podés usar un archivo externo.'; }
+          refreshSubtitleOptions();
           element('pause').textContent = paused ? 'Reanudar' : 'Pausar';
           status(paused ? 'En pausa' : ''); showControls();
         }
@@ -208,26 +332,12 @@
   function seek(delta) {
     if (!playing || preparing) { return; }
     var target = Math.max(0, Math.min(position + delta * 1000, duration ? duration - 1000 : 172800000));
+    nativeCaption = null;
     try {
       if (compatible) { startPlayback(true, target / 1000, player.getState() === 'PAUSED'); }
-      else { player.seekTo(target, function () {}, playbackError); }
+      else { position = target; renderSubtitles(); player.seekTo(target, function () {}, playbackError); }
       showControls();
     } catch (error) { playbackError(error); }
-  }
-  function subtitles() {
-    if (!playing || preparing || compatible) { return; }
-    try {
-      var tracks = player.getTotalTrackInfo().filter(function (track) { return track.type === 'TEXT'; });
-      if (!tracks.length) { status('No hay subtítulos incrustados compatibles.'); showControls(); return; }
-      subtitleIndex += 1;
-      if (subtitleIndex >= tracks.length) {
-        subtitleIndex = -1; player.setSilentSubtitle(true); element('subtitles').textContent = 'Subtítulos desactivados';
-      } else {
-        player.setSelectTrack('TEXT', tracks[subtitleIndex].index); player.setSilentSubtitle(false);
-        element('subtitles').textContent = 'Subtítulo ' + (subtitleIndex + 1) + ' de ' + tracks.length;
-      }
-      showControls();
-    } catch (error) { status('El televisor no pudo cambiar los subtítulos.'); showControls(); }
   }
   function moveFocus(direction) {
     var origin = document.activeElement.getBoundingClientRect();
@@ -258,7 +368,7 @@
   element('pause').onclick = pause;
   element('rewind').onclick = function () { seek(-30); };
   element('forward').onclick = function () { seek(30); };
-  element('subtitles').onclick = subtitles;
+  element('subtitles').onchange = function () { element('subtitle-status').textContent = ''; chooseSubtitle(this.value, true); showControls(); };
   element('stop').onclick = stopPlayback;
   document.addEventListener('keydown', function (event) {
     var code = event.keyCode;

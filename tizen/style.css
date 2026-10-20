@@ -27,3 +27,6 @@ body.playing #native-player {display:block}
 .player-controls {position:fixed;bottom:0;left:0;width:100%;padding:22px 50px;background:rgba(0,0,0,.8)}
 .player-controls h2 {font-size:30px;margin:0 0 12px}
 .player-controls p {margin:10px 0}
+.player-controls select {max-width:580px}
+#subtitle-status {color:#ffe7a6}
+#subtitle-overlay {position:fixed;bottom:8%;left:10%;width:80%;padding:8px 18px;white-space:pre-line;text-align:center;font-size:42px;line-height:1.3;color:#fff;background:rgba(0,0,0,.6);text-shadow:2px 2px 3px #000;border-radius:8px;pointer-events:none}
