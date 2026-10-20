@@ -176,9 +176,27 @@ El modo predeterminado transmite MP4 fragmentado con AAC estéreo, usando la con
 
 El panel de Cast permite pausar, reanudar, detener, ajustar volumen, seleccionar subtítulos externos y buscar una posición. En modo compatible, la búsqueda vuelve a cargar el stream desde el instante indicado y ajusta los tiempos WebVTT; requiere conocer la duración. En modo Original se usa la búsqueda nativa del receptor. Los controles desaparecen al terminar la sesión; cerrar un modal no la termina.
 
-`POST /api/movies/{file_id}/cast` entrega un enlace de autorización cifrado y autenticado con vencimiento de 12 horas, limitado a una película y su carpeta. El receptor lo envía como `cast_token` a los endpoints de video y subtítulos, sin cookies ni credenciales de Google. Cada petición comprueba la biblioteca y los permisos actuales. Los enlaces privados dependen de la sesión que los creó; cerrar sesión los revoca para peticiones nuevas. Los públicos dependen de que siga habilitada la publicación. Cambiar de carpeta o deshabilitar descargas también impide nuevos accesos. Solo las rutas de medios ofrecen CORS, preflight y HEAD para el receptor; estos enlaces no autorizan consultas del catálogo ni escrituras.
+`POST /api/movies/{file_id}/cast` entrega un enlace de autorización cifrado y autenticado con vencimiento de 12 horas, limitado a una película y su carpeta. El receptor lo envía como `cast_token` a los endpoints de video y subtítulos, sin cookies ni credenciales de Google. Cada petición comprueba la biblioteca y los permisos actuales. Los enlaces privados dependen de la sesión que los creó; cerrar sesión los revoca para peticiones nuevas. Los públicos dependen de que siga habilitada la publicación. Cambiar de carpeta o deshabilitar descargas también impide nuevos accesos. Las rutas de medios ofrecen CORS, preflight y HEAD para el receptor; estos enlaces no autorizan consultas del catálogo ni escrituras. Las lecturas del catálogo y las fichas también ofrecen CORS sin credenciales para el cliente Tizen: la biblioteca privada sigue exigiendo sesión y no se habilitan escrituras entre orígenes.
 
 La integración se comprobó en navegador con un SDK/receptor simulado y con pruebas de API y conversión real de MKV/E-AC-3 a MP4/AAC. Queda pendiente verificar reproducción, pausas prolongadas, reconexión y búsquedas con un Chromecast físico y archivos reales. Siguen aplicando los límites del hosting y de dos conversiones simultáneas por proceso.
+
+## Prototipo Samsung Tizen
+
+`tizen/` contiene una aplicación web empaquetada para televisores Samsung, separada del frontend de escritorio y escrita sin dependencias de JavaScript. Consume el catálogo público de esta instancia, en páginas de 16, con búsqueda, fichas, versiones y navegación por foco. Necesita **Acceso abierto**: no implementa login Google ni administración desde el televisor.
+
+La reproducción usa [Samsung AVPlay](https://developer.samsung.com/smarttv/develop/api-references/samsung-product-api-references/avplay-api.html). **Reproducir original** envía el archivo de Drive a la TV a través del servidor, con búsqueda temporal y selección de pistas de subtítulos incrustadas que AVPlay reconozca. **Audio compatible (AAC)** usa el remultiplexado MP4 del backend y reinicia el stream al buscar otra posición; este modo no incluye pistas incrustadas. No se recodifica el video. Los formatos admitidos dependen del modelo de TV; los subtítulos externos y su descarga a almacenamiento Tizen quedan pendientes.
+
+Para generar el paquete, sin instalar Tizen Studio:
+
+```bash
+uv run python tizen/build.py
+```
+
+El archivo generado es `tizen/dist/cinemateca.wgt`, un paquete sin firma que contiene únicamente los cuatro recursos de la app, sin credenciales. [Apps2Samsung](https://github.com/Apps2Samsung/Apps2Samsung) admite paquetes `.wgt` propios y gestiona su firma e instalación. En el televisor, habilitá Developer Mode; en Apps2Samsung elegí el dispositivo y el paquete generado, y completá la configuración de certificados que solicite. El instalador requiere acceso por red al TV. El manifiesto declara Tizen 2.3 como mínimo para las APIs usadas, sin afirmar compatibilidad verificada con todos los modelos desde esa versión.
+
+El control usa flechas y Enter para navegar, Volver para cerrar el reproductor o regresar al catálogo, y las teclas multimedia disponibles para pausa/reanudación y saltos de 30 segundos. Los controles se ocultan después de seis segundos y reaparecen al usar el mando. En la raíz, Volver sale de la aplicación. Ocultar o cerrar la app libera AVPlay.
+
+Validado con catálogo de prueba y AVPlay simulado: paginación 16→32, fichas, reproducción original, pausa, saltos, selección de subtítulos, remultiplexado desde otra posición y regreso con recuperación del foco. **Pendiente** instalar en un TV físico y comprobar modelo/Tizen, certificados, HTTPS, códecs, subtítulos y reproducción prolongada. El `.wgt` y sus fuentes no forman parte del despliegue de FastAPI Cloud.
 
 ## Verificación y límites
 

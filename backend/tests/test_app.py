@@ -356,10 +356,10 @@ def test_public_cast_tickets_survive_logout_and_respect_sharing(client, drive):
     assert client.post('/api/movies/test_movie_12345/cast').status_code == 401
 
 
-def test_cast_media_preflight_is_limited_to_media_routes(client):
+def test_device_cors_is_limited_to_read_routes(client):
     headers = {'Origin': 'https://receiver.example', 'Access-Control-Request-Method': 'GET',
                'Access-Control-Request-Headers': 'Range'}
-    for path in ('/api/stream/test_movie_12345', '/api/play/test_movie_12345',
+    for path in ('/api/movies', '/api/movies/test_movie_12345', '/api/stream/test_movie_12345', '/api/play/test_movie_12345',
                  '/api/movies/test_movie_12345/subtitles/test_subtitle_12345'):
         response = client.options(path, headers=headers)
         assert response.status_code == 204
@@ -369,7 +369,7 @@ def test_cast_media_preflight_is_limited_to_media_routes(client):
         denied = client.get(path)
         assert denied.status_code == 401
         assert denied.headers['access-control-allow-origin'] == '*'
-    for path in ('/api/movies', '/api/sharing', '/auth/login'):
+    for path in ('/api/sharing', '/auth/login', '/api/movies/test_movie_12345/cast'):
         assert 'access-control-allow-origin' not in client.options(path, headers=headers).headers
 
 

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1920">
+  <title>Cinemateca</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="$WEBAPIS/webapis/webapis.js"></script>
+</head>
+<body>
+  <object id="native-player" type="application/avplayer"></object>
+  <main id="library">
+    <header><h1>Cinemateca</h1><p>Películas de tu biblioteca · Flechas para navegar · Enter para elegir · Volver para regresar</p></header>
+    <div id="message" role="status" aria-live="polite"></div>
+    <section id="catalog">
+      <form id="search-form"><input id="search" type="search" placeholder="Buscar película, director, año…" aria-label="Buscar películas" data-focus><button type="submit" data-focus>Buscar</button><button id="reset" type="button" data-focus>Todas</button></form>
+      <p id="count"></p>
+      <div id="movies"></div>
+      <button id="more" data-focus>Cargar 16 más</button>
+    </section>
+    <section id="details" hidden>
+      <button id="back" data-focus>Volver al catálogo</button>
+      <div class="film-details"><img id="poster" alt=""><div><h2 id="title"></h2><p id="facts"></p><p id="credits"></p><p id="overview"></p>
+        <label id="versions-label" hidden>Versión <select id="versions" data-focus></select></label>
+        <div class="actions"><button id="play" data-focus>Reproducir original</button><button id="compatible" data-focus>Audio compatible (AAC)</button></div>
+        <p>Si el original no tiene sonido, probá Audio compatible. El video debe ser compatible con este televisor.</p>
+      </div></div>
+    </section>
+  </main>
+  <section id="playback" hidden aria-label="Reproductor">
+    <div id="controls" class="player-controls"><h2 id="playing-title"></h2><p id="play-status" role="status"></p><p id="time"></p>
+      <button id="pause" data-focus>Pausar</button><button id="rewind" data-focus>−30 segundos</button><button id="forward" data-focus>+30 segundos</button><button id="subtitles" data-focus>Subtítulos incrustados</button><button id="stop" data-focus>Volver a la ficha</button>
+    </div>
+  </section>
+  <script src="app.js"></script>
+</body>
+</html>

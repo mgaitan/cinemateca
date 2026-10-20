@@ -173,13 +173,13 @@ DIST = BASE.parent / 'frontend' / 'dist'
 
 
 @app.middleware('http')
-async def media_cors(request: Request, call_next):
-    media = bool(re.fullmatch(r'/api/(?:stream/[^/]+|play/[^/]+|movies/[^/]+/subtitles/[^/]+)', request.url.path))
-    if media and request.method == 'OPTIONS':
+async def read_cors(request: Request, call_next):
+    readable = bool(re.fullmatch(r'/api/(?:movies(?:/[^/]+)?|stream/[^/]+|play/[^/]+|movies/[^/]+/subtitles/[^/]+)', request.url.path))
+    if readable and request.method == 'OPTIONS':
         response = Response(status_code=204)
     else:
         response = await call_next(request)
-    if media:
+    if readable:
         response.headers.update({
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',

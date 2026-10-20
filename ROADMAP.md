@@ -56,6 +56,7 @@ El README describe el comportamiento implementado y cómo ejecutarlo. Esta hoja 
 
 ## TV Samsung Tizen
 
-- [ ] Navegación por foco y control remoto.
+- [x] Prototipo con navegación por foco, control remoto, catálogo paginado y AVPlay; validado con APIs simuladas.
 - [ ] Compatibilidad de códecs, subtítulos, pantalla completa y rendimiento en un televisor o SDK real.
-- [ ] Manifiesto y empaquetado Tizen después de validar el reproductor web.
+- [x] Manifiesto y generación de `.wgt` sin firma para pruebas con Apps2Samsung.
+- [ ] Firma, instalación y validación en el modelo de TV del usuario; subtítulos externos en el cliente Tizen.

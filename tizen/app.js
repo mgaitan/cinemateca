@@ -1,0 +1,285 @@
+(function () {
+  'use strict';
+  var server = 'https://cinemateca.fastapicloud.dev';
+  var selected = null;
+  var versions = [];
+  var nextOffset = 0;
+  var query = '';
+  var loading = false;
+  var catalogRequest = null;
+  var detailRequest = null;
+  var seen = {};
+  var returnFocus = null;
+  var playing = false;
+  var preparing = false;
+  var compatible = false;
+  var position = 0;
+  var offset = 0;
+  var duration = 0;
+  var generation = 0;
+  var subtitleIndex = -1;
+  var controlsTimer;
+  var player = window.webapis && window.webapis.avplay;
+
+  function element(id) { return document.getElementById(id); }
+  function message(text) { element('message').textContent = text; }
+  function status(text) { element('play-status').textContent = text; }
+  function clock(milliseconds) {
+    var seconds = Math.floor(Math.max(0, milliseconds) / 1000);
+    var minutes = Math.floor(seconds / 60);
+    return Math.floor(minutes / 60) + ':' + ('0' + minutes % 60).slice(-2) + ':' + ('0' + seconds % 60).slice(-2);
+  }
+  function request(path, success, failure) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', server + path);
+    xhr.timeout = 45000;
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { success(JSON.parse(xhr.responseText)); }
+        catch (error) { failure('No se pudo leer la respuesta del servidor.'); }
+      } else if (xhr.status === 401 || xhr.status === 403) {
+        failure('Activá el acceso abierto de la biblioteca desde Cinemateca en tu celular o computadora.');
+      } else { failure('El servidor no pudo completar la operación. Intentá de nuevo.'); }
+    };
+    xhr.onerror = xhr.ontimeout = function () { failure('No se pudo conectar con Cinemateca. Revisá la conexión e intentá de nuevo.'); };
+    xhr.send();
+    return xhr;
+  }
+  function titleKey(movie) {
+    var title = movie.title;
+    if (title.normalize) { title = title.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+    return movie.tmdbId ? 'tmdb:' + movie.tmdbId : title.toLowerCase() + '|' + movie.year;
+  }
+  function loadCatalog(reset) {
+    if (reset && catalogRequest) { catalogRequest.abort(); loading = false; }
+    if (loading || (!reset && nextOffset === null)) { return; }
+    if (reset) { nextOffset = 0; seen = {}; element('movies').textContent = ''; }
+    loading = true;
+    element('more').disabled = true;
+    message('Cargando películas…');
+    catalogRequest = request('/api/movies?limit=16&offset=' + nextOffset + '&q=' + encodeURIComponent(query), function (data) {
+      loading = false;
+      message(data.count ? '' : 'No se encontraron películas.');
+      element('count').textContent = data.count + ' películas';
+      data.movies.forEach(function (movie) {
+        var key = titleKey(movie);
+        if (seen[key]) { return; }
+        seen[key] = true;
+        var button = document.createElement('button');
+        button.className = 'movie';
+        button.setAttribute('data-focus', '');
+        var poster = document.createElement('img');
+        poster.alt = '';
+        if (movie.poster || movie.backdrop) { poster.src = movie.poster || movie.backdrop; }
+        var title = document.createElement('span');
+        title.textContent = movie.title;
+        var facts = document.createElement('small');
+        facts.textContent = [movie.year, movie.country].filter(Boolean).join(' · ');
+        button.appendChild(poster); button.appendChild(title); button.appendChild(facts);
+        button.onclick = function () { returnFocus = button; loadDetails(movie.id); };
+        element('movies').appendChild(button);
+      });
+      nextOffset = data.next_offset;
+      element('more').hidden = nextOffset === null;
+      element('more').disabled = false;
+      if (reset && element('movies').firstChild) { element('movies').firstChild.focus(); }
+    }, function (error) {
+      loading = false; message(error); element('more').hidden = false; element('more').disabled = false;
+    });
+  }
+  function showDetails(movie) {
+    selected = movie;
+    element('catalog').hidden = true;
+    element('details').hidden = false;
+    element('title').textContent = movie.title;
+    element('facts').textContent = [movie.year, movie.country, movie.duration ? movie.duration + ' min' : ''].filter(Boolean).join(' · ');
+    element('credits').textContent = [movie.director, (movie.cast || []).join(', ')].filter(Boolean).join(' · ');
+    element('overview').textContent = movie.overview || '';
+    element('poster').hidden = !(movie.poster || movie.backdrop);
+    if (!element('poster').hidden) { element('poster').src = movie.poster || movie.backdrop; }
+    element('play').disabled = element('compatible').disabled = !movie.canDownload;
+    element('versions-label').hidden = versions.length < 2;
+    element('versions').textContent = '';
+    versions.forEach(function (version) {
+      var option = document.createElement('option');
+      option.value = version.id; option.textContent = version.filename || version.title;
+      option.selected = version.id === movie.id;
+      element('versions').appendChild(option);
+    });
+    message(movie.canDownload ? '' : 'El propietario deshabilitó la descarga y reproducción del archivo.');
+    element(movie.canDownload ? 'play' : 'back').focus();
+  }
+  function loadDetails(id) {
+    if (detailRequest) { detailRequest.abort(); }
+    message('Cargando ficha…');
+    detailRequest = request('/api/movies/' + encodeURIComponent(id), function (data) {
+      versions = data.versions; showDetails(data.movie);
+    }, message);
+  }
+  function back() {
+    if (playing) { stopPlayback(); return; }
+    if (!element('details').hidden) {
+      element('details').hidden = true; element('catalog').hidden = false; message('');
+      if (returnFocus) { returnFocus.focus(); }
+    } else if (window.tizen && window.tizen.application) { window.tizen.application.getCurrentApplication().exit(); }
+  }
+  function showControls() {
+    window.clearTimeout(controlsTimer);
+    element('controls').hidden = false;
+    controlsTimer = window.setTimeout(function () { if (playing && !preparing) { element('controls').hidden = true; } }, 6000);
+  }
+  function releasePlayer() {
+    generation += 1;
+    window.clearTimeout(controlsTimer);
+    if (player) { try { player.close(); } catch (error) { status('No se pudo cerrar la reproducción.'); } }
+  }
+  function stopPlayback() {
+    releasePlayer(); playing = false; preparing = false;
+    element('playback').hidden = true; element('library').hidden = false;
+    document.body.className = ''; document.documentElement.className = '';
+    element('play').focus();
+  }
+  function playbackError(error) {
+    stopPlayback();
+    message('No se pudo reproducir el archivo (' + (error.name || error) + '). Probá el otro modo de audio. El códec de video también debe ser compatible con el televisor.');
+  }
+  function startPlayback(audioCompatible, start, paused) {
+    if (!selected || !selected.canDownload) { return; }
+    if (!player) { message('La reproducción nativa requiere instalar Cinemateca.wgt en un televisor Samsung Tizen.'); return; }
+    releasePlayer();
+    var current = generation;
+    compatible = audioCompatible;
+    offset = compatible ? start : 0;
+    position = start * 1000;
+    duration = (selected.durationSeconds || selected.duration * 60) * 1000;
+    subtitleIndex = -1;
+    playing = true; preparing = true;
+    document.body.className = 'playing'; document.documentElement.className = 'playing';
+    element('library').hidden = true; element('playback').hidden = false;
+    element('playing-title').textContent = selected.title;
+    element('subtitles').textContent = 'Subtítulos incrustados';
+    element('subtitles').disabled = compatible;
+    element('time').textContent = clock(position);
+    status('Preparando reproducción…'); showControls(); element('pause').focus();
+    var url = server + '/api/' + (compatible ? 'play/' : 'stream/') + encodeURIComponent(selected.id);
+    if (compatible) { url += '?start=' + start; }
+    try {
+      player.open(url);
+      player.setDisplayRect(0, 0, 1920, 1080);
+      player.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX');
+      player.setListener({
+        onbufferingstart: function () { if (current === generation) { status('Cargando video…'); showControls(); } },
+        onbufferingcomplete: function () { if (current === generation) { status(''); } },
+        oncurrentplaytime: function (milliseconds) {
+          if (current !== generation) { return; }
+          position = offset * 1000 + milliseconds;
+          element('time').textContent = clock(position) + (duration ? ' / ' + clock(duration) : '');
+        },
+        onstreamcompleted: function () { if (current === generation) { stopPlayback(); } },
+        onerror: function (error) { if (current === generation) { playbackError(error); } }
+      });
+      player.prepareAsync(function () {
+        if (current !== generation) { return; }
+        preparing = false;
+        if (!duration) { duration = offset * 1000 + player.getDuration(); }
+        function begin() {
+          if (current !== generation) { return; }
+          player.play();
+          if (paused) { player.pause(); }
+          element('pause').textContent = paused ? 'Reanudar' : 'Pausar';
+          status(paused ? 'En pausa' : ''); showControls();
+        }
+        try {
+          if (!compatible && start) { player.seekTo(start * 1000, begin, playbackError); }
+          else { begin(); }
+        } catch (error) { playbackError(error); }
+      }, function (error) { if (current === generation) { playbackError(error); } });
+    } catch (error) { playbackError(error); }
+  }
+  function pause() {
+    if (!playing || preparing) { return; }
+    try {
+      var paused = player.getState() === 'PAUSED';
+      if (paused) { player.play(); } else { player.pause(); }
+      element('pause').textContent = paused ? 'Pausar' : 'Reanudar';
+      status(paused ? '' : 'En pausa'); showControls();
+    } catch (error) { playbackError(error); }
+  }
+  function seek(delta) {
+    if (!playing || preparing) { return; }
+    var target = Math.max(0, Math.min(position + delta * 1000, duration ? duration - 1000 : 172800000));
+    try {
+      if (compatible) { startPlayback(true, target / 1000, player.getState() === 'PAUSED'); }
+      else { player.seekTo(target, function () {}, playbackError); }
+      showControls();
+    } catch (error) { playbackError(error); }
+  }
+  function subtitles() {
+    if (!playing || preparing || compatible) { return; }
+    try {
+      var tracks = player.getTotalTrackInfo().filter(function (track) { return track.type === 'TEXT'; });
+      if (!tracks.length) { status('No hay subtítulos incrustados compatibles.'); showControls(); return; }
+      subtitleIndex += 1;
+      if (subtitleIndex >= tracks.length) {
+        subtitleIndex = -1; player.setSilentSubtitle(true); element('subtitles').textContent = 'Subtítulos desactivados';
+      } else {
+        player.setSelectTrack('TEXT', tracks[subtitleIndex].index); player.setSilentSubtitle(false);
+        element('subtitles').textContent = 'Subtítulo ' + (subtitleIndex + 1) + ' de ' + tracks.length;
+      }
+      showControls();
+    } catch (error) { status('El televisor no pudo cambiar los subtítulos.'); showControls(); }
+  }
+  function moveFocus(direction) {
+    var origin = document.activeElement.getBoundingClientRect();
+    var best = null;
+    var bestScore = Infinity;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-focus]'), function (candidate) {
+      if (candidate.disabled || !candidate.offsetWidth || !candidate.offsetHeight || candidate === document.activeElement) { return; }
+      var rect = candidate.getBoundingClientRect();
+      var horizontal = (rect.left + rect.right - origin.left - origin.right) / 2;
+      var vertical = (rect.top + rect.bottom - origin.top - origin.bottom) / 2;
+      var forward = direction === 37 ? -horizontal : direction === 39 ? horizontal : direction === 38 ? -vertical : vertical;
+      var sideways = direction === 37 || direction === 39 ? Math.abs(vertical) : Math.abs(horizontal);
+      var score = forward + sideways * 3;
+      if (forward > 1 && score < bestScore) { best = candidate; bestScore = score; }
+    });
+    if (best) { best.focus(); }
+  }
+  element('search-form').onsubmit = function (event) { event.preventDefault(); query = element('search').value.trim(); loadCatalog(true); };
+  element('reset').onclick = function () { element('search').value = ''; query = ''; loadCatalog(true); };
+  element('more').onclick = function () { loadCatalog(false); };
+  element('back').onclick = back;
+  element('versions').onchange = function () {
+    var id = this.value;
+    versions.some(function (version) { if (version.id === id) { showDetails(version); return true; } return false; });
+  };
+  element('play').onclick = function () { startPlayback(false, 0, false); };
+  element('compatible').onclick = function () { startPlayback(true, 0, false); };
+  element('pause').onclick = pause;
+  element('rewind').onclick = function () { seek(-30); };
+  element('forward').onclick = function () { seek(30); };
+  element('subtitles').onclick = subtitles;
+  element('stop').onclick = stopPlayback;
+  document.addEventListener('keydown', function (event) {
+    var code = event.keyCode;
+    if (playing) { showControls(); }
+    if (code === 10009 || code === 27 || (playing && code === 413)) { event.preventDefault(); back(); }
+    else if (playing && (code === 10252 || code === 415 || code === 19 || code === 32)) {
+      event.preventDefault();
+      if ((code === 415 && player.getState() !== 'PAUSED') || (code === 19 && player.getState() !== 'PLAYING')) { return; }
+      pause();
+    } else if (playing && (code === 412 || code === 417)) { event.preventDefault(); seek(code === 412 ? -30 : 30); }
+    else if (code >= 37 && code <= 40 && document.activeElement.tagName !== 'SELECT') {
+      if (document.activeElement.tagName === 'INPUT' && (code === 37 || code === 39)) { return; }
+      event.preventDefault(); moveFocus(code);
+    }
+  });
+  if (window.tizen && window.tizen.tvinputdevice) {
+    ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'MediaRewind', 'MediaFastForward'].forEach(function (key) {
+      try { window.tizen.tvinputdevice.registerKey(key); } catch (error) { message('Algunas teclas multimedia no están disponibles en este modelo.'); }
+    });
+  }
+  document.addEventListener('visibilitychange', function () { if (document.hidden && playing) { stopPlayback(); } });
+  window.addEventListener('unload', releasePlayer);
+  element('search').focus(); loadCatalog(true);
+}());

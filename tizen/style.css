@@ -1,0 +1,29 @@
+* {box-sizing:border-box}
+html,body {margin:0;width:100%;min-height:100%;font-family:Arial,sans-serif;background:#161b17;color:#f7f7f2;font-size:26px}
+[hidden] {display:none!important}
+main {padding:50px 70px}
+header h1 {font-size:48px;margin:0 0 12px}
+header p,#count {color:#bdc6b7}
+button,input,select {font:inherit;border:2px solid #6c7c65;border-radius:8px;padding:16px 22px;background:#263024;color:#fff;margin:6px;max-width:100%}
+button {cursor:pointer}
+button:disabled {opacity:.45}
+button:focus,input:focus,select:focus {outline:5px solid #d8eea5;outline-offset:3px;background:#405534}
+input {width:900px}
+#message {color:#ffe7a6;min-height:40px;margin:18px 0;white-space:pre-wrap}
+#movies {display:flex;flex-wrap:wrap}
+.movie {width:23%;margin:1%;padding:0;border:0;background:none;text-align:left;vertical-align:top}
+.movie img {width:100%;height:480px;object-fit:cover;display:block;border-radius:8px;background:#36402f}
+.movie span {display:block;margin:14px 0 8px;font-size:28px}
+.movie small {color:#bdc6b7;font-size:23px}
+.film-details {display:flex;margin-top:30px}
+.film-details>img {width:320px;height:480px;object-fit:cover;margin-right:50px;background:#36402f}
+.film-details>div {flex:1;min-width:0}
+h2 {font-size:40px;margin:12px 0 24px}
+#overview {line-height:1.5}
+.actions {margin:28px 0}
+#native-player {position:fixed;left:0;top:0;width:100%;height:100%;display:none}
+html.playing,body.playing {background:transparent}
+body.playing #native-player {display:block}
+.player-controls {position:fixed;bottom:0;left:0;width:100%;padding:22px 50px;background:rgba(0,0,0,.8)}
+.player-controls h2 {font-size:30px;margin:0 0 12px}
+.player-controls p {margin:10px 0}

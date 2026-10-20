@@ -4,5 +4,6 @@ backend/tests/
 frontend/src/
 frontend/public/
 preview.html
+tizen/
 .env.*
 backend/.env.*
